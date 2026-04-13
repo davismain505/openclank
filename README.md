@@ -1,4 +1,6 @@
-# openclank
+# OpenClank
+
+![logo](./logo.svg)
 
 A terminal interface for Claude on illumos,
 where other tools have failed or proved too frail.
