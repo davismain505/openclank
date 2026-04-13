@@ -3,6 +3,12 @@ name = "openclank"
 version = "0.1.0"
 edition = "2024"
 
+# Exposes mock backends and test harnesses to integration tests in tests/.
+# Not included in release builds. Integration tests enable this via
+# dev-dependencies below.
+[features]
+test-support = []
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
@@ -13,6 +19,15 @@ serde_json = "1"
 futures = "0.3"
 dirs = "6"
 unicode-width = "0.2"
+clap = { version = "4", features = ["derive"] }
+
+# This self-referential dev-dependency is a standard Rust pattern for
+# enabling a feature only during testing. Integration tests in tests/
+# compile the crate as an external dependency, so they need the
+# test-support feature enabled here to access mock backends and test
+# harnesses. Unit tests (#[cfg(test)]) get them automatically.
+[dev-dependencies]
+openclank = { path = ".", features = ["test-support"] }
 
 [profile.release]
 strip = true
