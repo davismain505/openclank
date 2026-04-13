@@ -1,0 +1,16 @@
+---
+source: src/render/chat_view.rs
+expression: output
+---
+┌ Chat ──────────────────────────────────────────┐
+│You: list files                                 │
+│                                                │
+│Claude: Let me check.                           │
+│        [tool: bash]                            │
+│          ls -la                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+└────────────────────────────────────────────────┘

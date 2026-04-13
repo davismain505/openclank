@@ -199,6 +199,15 @@ pub struct Message {
 }
 
 impl Message {
+    /// Create a message with an explicit role and content blocks.
+    /// This is the most general constructor — used when you need to
+    /// build messages with tool-use or tool-result blocks, or mixed
+    /// content that the convenience constructors (`user`, `assistant`)
+    /// don't cover.
+    pub fn from_content_blocks(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self { role, content }
+    }
+
     /// Create a user message containing a single text block.
     pub fn user(text: &str) -> Self {
         Self {

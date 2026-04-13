@@ -1,0 +1,14 @@
+---
+source: src/render/chat_view.rs
+expression: output
+---
+┌ Chat ──────────────────────────────────────────┐
+│You: [tool result]                              │
+│       file1.txt                                │
+│       file2.txt                                │
+│       file3.txt                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+└────────────────────────────────────────────────┘

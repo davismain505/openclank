@@ -1,0 +1,5 @@
+---
+source: src/render/status_bar.rs
+expression: output
+---
+ claude-sonnet-4-20250514 Streaming...

@@ -30,6 +30,7 @@ hex = "0.4"
 # harnesses. Unit tests (#[cfg(test)]) get them automatically.
 [dev-dependencies]
 openclank = { path = ".", features = ["test-support"] }
+insta = "1"
 
 [profile.release]
 strip = true

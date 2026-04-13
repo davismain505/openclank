@@ -1,0 +1,7 @@
+---
+source: src/render/tool_view.rs
+expression: output
+---
+┌ Tool Approval ───────────────────────────────────────────┐
+│ Approve [read_file] /etc/passwd (y/n)                    │
+└──────────────────────────────────────────────────────────┘

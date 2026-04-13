@@ -1,0 +1,14 @@
+---
+source: src/render/chat_view.rs
+expression: output
+---
+┌ Chat ────────────────────────────────┐
+│You: hello                            │
+│                                      │
+│Claude: Working on it                 │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

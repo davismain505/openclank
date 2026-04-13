@@ -1,0 +1,7 @@
+---
+source: src/render/input_view.rs
+expression: output
+---
+┌ > ─────────────────────────┐
+│hello world                 │
+└────────────────────────────┘

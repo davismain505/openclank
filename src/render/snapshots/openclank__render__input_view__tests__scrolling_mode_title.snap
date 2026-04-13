@@ -1,0 +1,7 @@
+---
+source: src/render/input_view.rs
+expression: output
+---
+┌ Input (scroll mode - press i to type) ─────────┐
+│                                                │
+└────────────────────────────────────────────────┘
