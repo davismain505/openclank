@@ -17,8 +17,8 @@
 //! In [`Mode::ToolApproval`], the input area is replaced with the tool
 //! approval prompt showing what the model wants to execute.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::Frame;
 
 use crate::state::app::{AppState, Mode};
 
@@ -44,9 +44,9 @@ pub fn render_app(frame: &mut Frame, state: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),                  // chat history
-            Constraint::Length(INPUT_HEIGHT),     // input or tool approval
-            Constraint::Length(STATUS_HEIGHT),    // status bar
+            Constraint::Min(1),                // chat history
+            Constraint::Length(INPUT_HEIGHT),  // input or tool approval
+            Constraint::Length(STATUS_HEIGHT), // status bar
         ])
         .split(area);
 

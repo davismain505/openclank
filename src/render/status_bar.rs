@@ -4,11 +4,11 @@
 //! shows the current status message (e.g. "Ready", "Streaming...",
 //! "Error: ...") with color-coded styling based on the status kind.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::state::app::{AppState, StatusKind};
 
@@ -45,30 +45,15 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::render_to_string;
     use crate::state::app::StatusLine;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-
-    fn render_to_string(state: &AppState, width: u16) -> String {
-        let backend = TestBackend::new(width, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_status(frame, frame.area(), state);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let mut result = String::new();
-        for x in 0..width {
-            result.push_str(buffer[(x, 0)].symbol());
-        }
-        result
-    }
+    use ratatui::Terminal;
 
     #[test]
     fn default_status_shows_ready() {
         let state = AppState::default();
-        let output = render_to_string(&state, 60);
+        let output = render_to_string(60, 1, |frame, area| render_status(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -79,7 +64,7 @@ mod tests {
             text: "Streaming...".to_string(),
             kind: StatusKind::Streaming,
         };
-        let output = render_to_string(&state, 60);
+        let output = render_to_string(60, 1, |frame, area| render_status(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -90,7 +75,7 @@ mod tests {
             text: "Error: rate limited".to_string(),
             kind: StatusKind::Error,
         };
-        let output = render_to_string(&state, 60);
+        let output = render_to_string(60, 1, |frame, area| render_status(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 

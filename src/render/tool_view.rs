@@ -5,11 +5,11 @@
 //! must press 'y' to approve or 'n' to deny. This module renders that
 //! prompt.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use crate::state::app::AppState;
 use crate::state::message::{ContentBlock, ToolUseId};
@@ -19,12 +19,7 @@ use crate::state::message::{ContentBlock, ToolUseId};
 /// Shows the tool name and a compact summary of its arguments, with a
 /// "(y/n)" prompt. The tool name is highlighted in yellow to draw
 /// attention to what's being requested.
-pub fn render_tool_approval(
-    frame: &mut Frame,
-    area: Rect,
-    state: &AppState,
-    tool_id: &ToolUseId,
-) {
+pub fn render_tool_approval(frame: &mut Frame, area: Rect, state: &AppState, tool_id: &ToolUseId) {
     // Find the tool call in the conversation to get its name and input.
     let tool_info = find_tool_info(state, tool_id);
 
@@ -47,7 +42,10 @@ pub fn render_tool_approval(
         // conversation when we're in ToolApproval mode. Show a fallback
         // so the user can still approve or deny.
         None => Line::from(vec![
-            Span::styled(" Approve tool call? ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Approve tool call? ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled("(y/n)", Style::default().fg(Color::DarkGray)),
         ]),
     };
@@ -86,34 +84,12 @@ fn find_tool_info(state: &AppState, tool_id: &ToolUseId) -> Option<(String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::render_to_string;
     use crate::state::app::Mode;
     use crate::state::message::{ContentBlock, Message, ToolName, ToolUseId};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
-    fn render_to_string(state: &AppState, tool_id: &ToolUseId, width: u16, height: u16) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_tool_approval(frame, frame.area(), state, tool_id);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let mut result = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                result.push_str(buffer[(x, y)].symbol());
-            }
-            if y < height - 1 {
-                result.push('\n');
-            }
-        }
-        result
-    }
-
-    /// Build a state with a tool-use message in the conversation and
-    /// the app in ToolApproval mode.
     fn state_with_tool_approval(
         tool_id: &ToolUseId,
         name: ToolName,
@@ -121,8 +97,6 @@ mod tests {
     ) -> AppState {
         let mut state = AppState::default();
 
-        // Manually construct an assistant message with a tool-use block.
-        // We can't use Message::assistant() because that only creates text.
         let msg = Message::from_content_blocks(
             crate::state::message::Role::Assistant,
             vec![ContentBlock::ToolUse {
@@ -144,7 +118,9 @@ mod tests {
             ToolName::Bash,
             serde_json::json!({"command": "ls -la /tmp"}),
         );
-        let output = render_to_string(&state, &tool_id, 60, 3);
+        let output = render_to_string(60, 3, |frame, area| {
+            render_tool_approval(frame, area, &state, &tool_id);
+        });
         insta::assert_snapshot!(output);
     }
 
@@ -156,7 +132,9 @@ mod tests {
             ToolName::ReadFile,
             serde_json::json!({"path": "/etc/passwd"}),
         );
-        let output = render_to_string(&state, &tool_id, 60, 3);
+        let output = render_to_string(60, 3, |frame, area| {
+            render_tool_approval(frame, area, &state, &tool_id);
+        });
         insta::assert_snapshot!(output);
     }
 

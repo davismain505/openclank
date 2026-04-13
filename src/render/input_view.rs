@@ -5,10 +5,10 @@
 //! positions the terminal cursor at the correct location so the blinking
 //! cursor appears where the next character will be inserted.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::state::app::{AppState, Mode};
 
@@ -71,36 +71,14 @@ pub fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
+    use crate::render::test_support::render_to_string;
     use ratatui::backend::TestBackend;
-
-    /// Render the input view to a TestBackend and return the buffer
-    /// as a string suitable for insta snapshots.
-    fn render_to_string(state: &AppState, width: u16, height: u16) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_input(frame, frame.area(), state);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let mut result = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                result.push_str(buffer[(x, y)].symbol());
-            }
-            if y < height - 1 {
-                result.push('\n');
-            }
-        }
-        result
-    }
+    use ratatui::Terminal;
 
     #[test]
     fn empty_input_normal_mode() {
         let state = AppState::default();
-        let output = render_to_string(&state, 30, 3);
+        let output = render_to_string(30, 3, |frame, area| render_input(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -110,7 +88,7 @@ mod tests {
         for c in "hello world".chars() {
             state.input.insert_char(c);
         }
-        let output = render_to_string(&state, 30, 3);
+        let output = render_to_string(30, 3, |frame, area| render_input(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -118,7 +96,7 @@ mod tests {
     fn scrolling_mode_title() {
         let mut state = AppState::default();
         state.mode = Mode::Scrolling;
-        let output = render_to_string(&state, 50, 3);
+        let output = render_to_string(50, 3, |frame, area| render_input(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 

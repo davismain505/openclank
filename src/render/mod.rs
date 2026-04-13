@@ -76,6 +76,33 @@ pub fn format_tool_input(tool: ToolName, input: &serde_json::Value) -> String {
 }
 
 #[cfg(test)]
+pub mod test_support {
+    use ratatui::{backend::TestBackend, layout::Rect, Frame, Terminal};
+
+    pub fn render_to_string<F>(width: u16, height: u16, render_fn: F) -> String
+    where
+        F: FnOnce(&mut Frame, Rect),
+    {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_fn(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut result = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                result.push_str(buffer[(x, y)].symbol());
+            }
+            if y < height - 1 {
+                result.push('\n');
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
 mod format_tool_input_tests {
     use super::*;
 

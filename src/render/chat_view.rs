@@ -12,11 +12,11 @@
 //! During streaming, the in-progress [`MessageDraft`] is rendered below
 //! the finalized messages with the same formatting.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::state::app::AppState;
 use crate::state::message::{ContentBlock, Message, Role};
@@ -227,8 +227,6 @@ fn render_message_lines(lines: &mut Vec<Line>, msg: &Message) {
     }
 }
 
-
-
 /// Truncate a multi-line string to at most `max_lines` lines. If
 /// truncated, appends a "... (N more lines)" indicator so the user
 /// knows output was clipped.
@@ -245,38 +243,16 @@ fn truncate_lines(text: &str, max_lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::render_to_string;
     use crate::state::app::AppState;
     use crate::state::message::{ContentBlock, Message, Role, ToolName, ToolUseId};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-
-    /// Render the chat view to a TestBackend and return the buffer
-    /// as a string suitable for insta snapshots.
-    fn render_to_string(state: &AppState, width: u16, height: u16) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_chat(frame, frame.area(), state);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let mut result = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                result.push_str(buffer[(x, y)].symbol());
-            }
-            if y < height - 1 {
-                result.push('\n');
-            }
-        }
-        result
-    }
+    use ratatui::Terminal;
 
     #[test]
     fn empty_chat() {
         let state = AppState::default();
-        let output = render_to_string(&state, 40, 10);
+        let output = render_to_string(40, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -284,7 +260,7 @@ mod tests {
     fn single_user_message() {
         let mut state = AppState::default();
         state.conversation.push(Message::user("hello"));
-        let output = render_to_string(&state, 40, 10);
+        let output = render_to_string(40, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -292,8 +268,10 @@ mod tests {
     fn user_and_assistant_messages() {
         let mut state = AppState::default();
         state.conversation.push(Message::user("hello"));
-        state.conversation.push(Message::assistant("Hi there! How can I help?"));
-        let output = render_to_string(&state, 40, 10);
+        state
+            .conversation
+            .push(Message::assistant("Hi there! How can I help?"));
+        let output = render_to_string(40, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -302,8 +280,12 @@ mod tests {
         let mut state = AppState::default();
         state.conversation.push(Message::user("hello"));
         state.conversation.start_draft();
-        state.conversation.draft_mut().unwrap().append_text("Working on it");
-        let output = render_to_string(&state, 40, 10);
+        state
+            .conversation
+            .draft_mut()
+            .unwrap()
+            .append_text("Working on it");
+        let output = render_to_string(40, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -312,7 +294,7 @@ mod tests {
         let mut state = AppState::default();
         state.conversation.push(Message::user("hello"));
         state.conversation.start_draft();
-        let output = render_to_string(&state, 40, 10);
+        let output = render_to_string(40, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -331,7 +313,7 @@ mod tests {
                 },
             ],
         ));
-        let output = render_to_string(&state, 50, 12);
+        let output = render_to_string(50, 12, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -343,7 +325,7 @@ mod tests {
             "file1.txt\nfile2.txt\nfile3.txt".to_string(),
             false,
         ));
-        let output = render_to_string(&state, 50, 10);
+        let output = render_to_string(50, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
@@ -355,7 +337,7 @@ mod tests {
             "command not found: foobar".to_string(),
             true,
         ));
-        let output = render_to_string(&state, 50, 10);
+        let output = render_to_string(50, 10, |frame, area| render_chat(frame, area, &state));
         insta::assert_snapshot!(output);
     }
 
