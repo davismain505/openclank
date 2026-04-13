@@ -3,10 +3,14 @@ REMOTE_DIR := ~/openclank
 
 .PHONY: test test-live test-illumos test-illumos-live sync sync-credentials
 
-test:
+test: test-local test-illumos
+
+test-live: test-local-live test-illumos-live
+
+test-local:
 	cargo test
 
-test-live:
+test-local-live:
 	cargo test --test live_api_tests -- --ignored
 
 sync:
@@ -18,7 +22,7 @@ sync-credentials:
 	ssh $(HOST) "chmod 600 ~/.claude/.credentials.json"
 
 test-illumos: sync
-	ssh $(HOST) 'source ~/.zshrc && cd $(REMOTE_DIR) && gmake test'
+	ssh $(HOST) 'source ~/.zshrc && cd $(REMOTE_DIR) && gmake test-local'
 
 test-illumos-live: sync sync-credentials
-	ssh $(HOST) 'source ~/.zshrc && cd $(REMOTE_DIR) && gmake test-live'
+	ssh $(HOST) 'source ~/.zshrc && cd $(REMOTE_DIR) && gmake test-local-live'
