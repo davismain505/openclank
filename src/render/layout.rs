@@ -57,10 +57,15 @@ pub fn render_app(frame: &mut Frame, state: &AppState) {
     render_chat(frame, chat_area, state);
 
     // In ToolApproval mode, replace the input area with the approval
-    // prompt. Otherwise, show the normal text input.
+    // prompt for the current pending tool. In Executing mode, show a
+    // waiting indicator. Otherwise, show the normal text input.
     match &state.mode {
-        Mode::ToolApproval(tool_id) => {
-            render_tool_approval(frame, input_area, state, tool_id);
+        Mode::ToolApproval => {
+            if let Some(tool_id) = state.pending_tools.iter().next() {
+                render_tool_approval(frame, input_area, state, tool_id);
+            } else {
+                render_input(frame, input_area, state);
+            }
         }
         _ => {
             render_input(frame, input_area, state);

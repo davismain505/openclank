@@ -10,6 +10,8 @@
 //! how the UI is laid out. For example, in [`Mode::ToolApproval`] the
 //! input area is replaced with a yes/no prompt for the pending tool call.
 
+use std::collections::HashSet;
+
 use super::message::{Conversation, ToolUseId};
 
 /// A text input buffer with a cursor that maintains UTF-8 char boundary
@@ -333,8 +335,11 @@ mod input_buffer_tests {
 ///
 /// Scrolling ──[Esc/i/G/j=0]──▶ Normal
 ///
-/// ToolApproval ──[y/n]────────▶ Normal
-/// ToolApproval ──[Ctrl+C]─────▶ Quitting
+/// ToolApproval ──[y/n per tool]──▶ ToolApproval (more pending)
+/// ToolApproval ──[last tool resolved]──▶ Executing
+/// ToolApproval ──[Ctrl+C]────▶ Quitting
+///
+/// Executing ──[all results in]──▶ Normal (sends results to API)
 ///
 /// Quitting ──(terminal, all events ignored)
 /// ```
@@ -349,11 +354,19 @@ pub enum Mode {
     /// 'i' to return to Normal mode.
     Scrolling,
 
-    /// A tool-use request is pending approval. The UI shows the tool
-    /// name and arguments, and the user must press 'y' to approve or
-    /// 'n' to deny. The contained [`ToolUseId`] identifies which tool
-    /// call is being reviewed.
-    ToolApproval(ToolUseId),
+    /// Tool-use requests are pending approval. The UI shows the current
+    /// tool's name and arguments, and the user must press 'y' to
+    /// approve or 'n' to deny. The tool being shown is the first entry
+    /// in `AppState::pending_tools`. When the set empties, the mode
+    /// transitions to `Executing`.
+    ToolApproval,
+
+    /// Approved tools are running. The runner is executing subprocesses
+    /// or file operations for each approved tool. When all results are
+    /// collected (and combined with denial results), they are sent back
+    /// to the API in a single user message and the mode returns to
+    /// Normal (which triggers a new streaming response).
+    Executing,
 
     /// The application is shutting down. This mode is entered when the
     /// user presses the quit keybinding. The runner checks for this
@@ -436,8 +449,20 @@ pub struct AppState {
     pub scroll_offset: usize,
 
     /// The current interaction mode (normal input, scrolling, tool
-    /// approval, or quitting).
+    /// approval, executing, or quitting).
     pub mode: Mode,
+
+    /// Tool calls awaiting user approval. Non-empty only in
+    /// `Mode::ToolApproval`. The user resolves them one at a time
+    /// (y to approve, n to deny). When this set empties, the mode
+    /// transitions to `Executing`.
+    pub pending_tools: HashSet<ToolUseId>,
+
+    /// Tool calls the user approved but whose results haven't arrived
+    /// yet. Non-empty only in `Mode::ToolApproval` or `Mode::Executing`.
+    /// When this empties in `Executing` mode (and all denials are
+    /// recorded), all results are sent to the API together.
+    pub approved_tools: HashSet<ToolUseId>,
 
     /// The status bar content and style.
     pub status: StatusLine,
@@ -458,6 +483,8 @@ impl Default for AppState {
             input: InputBuffer::default(),
             scroll_offset: 0,
             mode: Mode::Normal,
+            pending_tools: HashSet::new(),
+            approved_tools: HashSet::new(),
             status: StatusLine::default(),
             viewport: Viewport::default(),
             model: "claude-sonnet-4-20250514".to_string(),

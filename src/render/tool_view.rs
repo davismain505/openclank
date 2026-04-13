@@ -106,7 +106,8 @@ mod tests {
             }],
         );
         state.conversation.push(msg);
-        state.mode = Mode::ToolApproval(tool_id.clone());
+        state.pending_tools.insert(tool_id.clone());
+        state.mode = Mode::ToolApproval;
         state
     }
 

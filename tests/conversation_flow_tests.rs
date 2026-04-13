@@ -64,24 +64,26 @@ impl TestHarness {
     }
 
     /// Send an event through the update function and process all
-    /// resulting effects, including recursive effects from processing
-    /// backend responses.
+    /// resulting effects. Uses an iterative effect queue rather than
+    /// recursion — effects can produce new events (e.g. DenyTool
+    /// produces a ToolResult), which produce new effects, and so on.
     async fn send_event(&mut self, event: AppEvent) {
         let (new_state, effects) = update(std::mem::take(&mut self.state), event);
         self.state = new_state;
 
-        for effect in effects {
-            self.process_effect(effect).await;
+        let mut effect_queue: Vec<Effect> = effects;
+        while let Some(effect) = effect_queue.first().cloned() {
+            effect_queue.remove(0);
+            let new_effects = self.process_effect(effect).await;
+            effect_queue.extend(new_effects);
         }
     }
 
     /// Execute a single effect the same way the real runner would.
-    ///
-    /// For `SendMessage`: calls the mock backend, maps each stream
-    /// event to an `AppEvent`, and feeds it through `update()`.
-    /// This may produce further effects (e.g. if the response
-    /// contains a tool-use and the test auto-approves it).
-    async fn process_effect(&mut self, effect: Effect) {
+    /// Returns any new effects produced by events triggered by this
+    /// effect (e.g. DenyTool triggers a ToolResult which may produce
+    /// a SendMessage). The caller drains these iteratively.
+    async fn process_effect(&mut self, effect: Effect) -> Vec<Effect> {
         match effect {
             Effect::SendMessage => {
                 // Start the stream.
@@ -90,12 +92,11 @@ impl TestHarness {
                 self.state = new_state;
 
                 // Collect all stream events upfront so we release the
-                // borrow on self.state before processing them. The mock
-                // backend doesn't actually need the messages to be live
-                // during streaming — it just reads the response index.
+                // borrow on self.state before processing them.
                 let stream = self.backend.send(&self.state.conversation.messages());
                 let results: Vec<_> = stream.collect().await;
 
+                let mut new_effects = Vec::new();
                 for result in results {
                     let event = match result {
                         Ok(BackendEvent::TextDelta(text)) => AppEvent::ApiTextDelta(text),
@@ -108,22 +109,37 @@ impl TestHarness {
                     let (new_state, effects) =
                         update(std::mem::take(&mut self.state), event);
                     self.state = new_state;
-
-                    for effect in effects {
-                        if let Effect::Quit = effect {
-                            return;
-                        }
-                    }
+                    new_effects.extend(effects);
                 }
+                new_effects
             }
 
             Effect::Quit => {
-                // Already handled by mode change.
+                Vec::new()
             }
 
-            Effect::ExecuteTool(_) | Effect::DenyTool(_) => {
-                // In integration tests, tool execution is handled
-                // explicitly by the test sending ToolResult events.
+            Effect::ExecuteTool(_) => {
+                // Tool execution is handled explicitly by the test
+                // sending ToolResult events.
+                Vec::new()
+            }
+
+            Effect::DenyTool(tool_id) => {
+                // The runner synthesizes a denial ToolResult and
+                // delivers it through update(), just like the real
+                // runner will. This is necessary for the ToolResult
+                // handler to add the denial message to the conversation
+                // and eventually emit SendMessage.
+                let (new_state, effects) = update(
+                    std::mem::take(&mut self.state),
+                    AppEvent::ToolResult {
+                        tool_use_id: tool_id,
+                        content: "Tool denied by user".to_string(),
+                        is_error: true,
+                    },
+                );
+                self.state = new_state;
+                effects
             }
         }
     }
@@ -175,7 +191,7 @@ async fn tool_use_enters_approval_mode() {
 
     // The app should be in ToolApproval mode, waiting for the user
     // to approve or deny the bash command.
-    assert_eq!(harness.state.mode, Mode::ToolApproval(tool_id));
+    assert_eq!(harness.state.mode, Mode::ToolApproval);
 
     // The assistant's message should contain both the leading text
     // and the tool-use block.
@@ -208,7 +224,7 @@ async fn tool_approval_and_result_continues_conversation() {
     // User sends a message, mock responds with tool use.
     harness.type_str("who am i").await;
     harness.press(KeyCode::Enter).await;
-    assert!(matches!(harness.state.mode, Mode::ToolApproval(_)));
+    assert!(harness.state.mode == Mode::ToolApproval);
 
     // User approves the tool call.
     harness.press(KeyCode::Char('y')).await;
@@ -246,7 +262,7 @@ async fn tool_denial_returns_to_normal() {
 
     harness.type_str("do something dangerous").await;
     harness.press(KeyCode::Enter).await;
-    assert!(matches!(harness.state.mode, Mode::ToolApproval(_)));
+    assert!(harness.state.mode == Mode::ToolApproval);
 
     // User denies the tool call.
     harness.press(KeyCode::Char('n')).await;

@@ -10,6 +10,8 @@
 //! depending on whether we're in Normal (typing), Scrolling (browsing
 //! history), or ToolApproval (reviewing a pending tool call) mode.
 
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::state::app::{AppState, Mode, StatusKind, StatusLine};
@@ -53,14 +55,25 @@ pub fn update(mut state: AppState, event: AppEvent) -> (AppState, Vec<Effect>) {
                     handle_scrolling_mode_key(&mut state, key_event);
                 }
 
-                // ToolApproval mode: a tool-use request is pending. The
-                // user sees what the model wants to execute and must press
-                // 'y' to approve or 'n' to deny. The ToolUseId identifies
-                // which tool call is being reviewed, so we can find it in
-                // the conversation and build the right Effect.
-                Mode::ToolApproval(tool_id) => {
-                    let tool_id = tool_id.clone();
-                    handle_tool_approval_key(&mut state, &mut effects, key_event, &tool_id);
+                // ToolApproval mode: tool-use requests are pending.
+                // The user reviews them one at a time from
+                // `pending_tools`. 'y' approves (moves to
+                // `approved_tools`), 'n' denies (just removes).
+                // When `pending_tools` empties, transitions to
+                // Executing.
+                Mode::ToolApproval => {
+                    handle_tool_approval_key(&mut state, &mut effects, key_event);
+                }
+
+                // Executing mode: approved tools are running. Keys
+                // are ignored except Ctrl+C to quit.
+                Mode::Executing => {
+                    if key_event.code == KeyCode::Char('c')
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        state.mode = Mode::Quitting;
+                        effects.push(Effect::Quit);
+                    }
                 }
 
                 // Quitting mode: ignore all input. The runner will see
@@ -125,24 +138,31 @@ pub fn update(mut state: AppState, event: AppEvent) -> (AppState, Vec<Effect>) {
             state.conversation.finalize_draft();
             state.scroll_offset = 0;
 
-            // Check if the most recent message has tool-use blocks.
-            let first_tool_id = state
+            // Collect all tool-use IDs from the finalized message.
+            // If any exist, enter ToolApproval with the full set.
+            // The user resolves them one at a time.
+            let tool_ids: HashSet<ToolUseId> = state
                 .conversation
                 .messages()
                 .last()
-                .and_then(|msg| {
-                    let uses = msg.tool_uses();
-                    uses.first().map(|(_, id, _, _)| (*id).clone())
-                });
+                .map(|msg| {
+                    msg.tool_uses()
+                        .into_iter()
+                        .map(|(_, id, _, _)| id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
 
-            if let Some(tool_id) = first_tool_id {
-                state.mode = Mode::ToolApproval(tool_id);
+            if tool_ids.is_empty() {
+                state.status = StatusLine::default();
+            } else {
+                state.pending_tools = tool_ids;
+                state.approved_tools.clear();
+                state.mode = Mode::ToolApproval;
                 state.status = StatusLine {
                     text: "Tool call pending approval (y/n)".to_string(),
                     kind: StatusKind::Info,
                 };
-            } else {
-                state.status = StatusLine::default();
             }
         }
 
@@ -158,28 +178,29 @@ pub fn update(mut state: AppState, event: AppEvent) -> (AppState, Vec<Effect>) {
             };
         }
 
-        // A tool finished executing (after the user approved it). We
-        // need to:
-        // 1. Add the tool result to the conversation as a new message
-        //    with a ToolResult content block
-        // 2. Send the updated conversation back to the API so the model
-        //    can see the tool's output and continue reasoning
-        //
-        // This creates the tool-use loop: model requests tool → user
-        // approves → tool runs → result sent to model → model may
-        // request another tool or give a final text response.
+        // A tool finished executing (after the user approved it).
+        // Remove it from approved_tools. When all approved tools
+        // have returned results, send everything (including denial
+        // results) back to the API in a single user message.
         AppEvent::ToolResult {
             tool_use_id,
             content,
             is_error,
         } => {
+            state.approved_tools.remove(&tool_use_id);
             let msg = Message::from_tool_result(tool_use_id, content, is_error);
             state.conversation.push(msg);
-            state.status = StatusLine {
-                text: "Sending tool result...".to_string(),
-                kind: StatusKind::Streaming,
-            };
-            effects.push(Effect::SendMessage);
+
+            // If all approved tools have returned results, send
+            // the conversation back to the API.
+            if state.approved_tools.is_empty() && state.mode == Mode::Executing {
+                state.mode = Mode::Normal;
+                state.status = StatusLine {
+                    text: "Sending tool results...".to_string(),
+                    kind: StatusKind::Streaming,
+                };
+                effects.push(Effect::SendMessage);
+            }
         }
 
         // Periodic tick (e.g. every 100ms) for UI animations.
@@ -362,69 +383,109 @@ fn handle_scrolling_mode_key(state: &mut AppState, key: crossterm::event::KeyEve
     }
 }
 
-/// Handle a key event in ToolApproval mode (reviewing a pending tool call).
+/// Handle a key event in ToolApproval mode (reviewing pending tool calls).
+///
+/// The current tool being reviewed is the first entry in
+/// `state.pending_tools`. 'y' approves it (moves to `approved_tools`
+/// and emits `ExecuteTool`), 'n' denies it (emits `DenyTool`). When
+/// `pending_tools` empties, we transition to `Executing` mode where
+/// the runner waits for all approved tool results before sending
+/// everything back to the API.
 ///
 /// Keybindings:
-/// - 'y': approve the tool call and execute it
-/// - 'n': deny the tool call
+/// - 'y': approve the current tool call
+/// - 'n': deny the current tool call
 /// - Ctrl+C: quit the application
 fn handle_tool_approval_key(
     state: &mut AppState,
     effects: &mut Vec<Effect>,
     key: crossterm::event::KeyEvent,
-    tool_id: &ToolUseId,
 ) {
+    // Pick the current tool to review. If pending_tools is empty
+    // (shouldn't happen in ToolApproval mode), do nothing.
+    let Some(current_tool_id) = state.pending_tools.iter().next().cloned() else {
+        return;
+    };
+
     match key.code {
-        // Approve the tool call. We find the matching ToolUse content
-        // block in the conversation (searching backwards since it's
-        // likely the most recent message), build a ToolCall effect
-        // from it, and return to Normal mode. The runner will execute
-        // the tool and feed the result back as an AppEvent::ToolResult.
-        //
-        // If the tool call is not found (which indicates a bug — the
-        // ToolApproval mode should only contain IDs that exist in the
-        // conversation), we show an error instead of silently proceeding
-        // with no ExecuteTool effect.
+        // Approve the current tool. Move it from pending to approved,
+        // emit an ExecuteTool effect so the runner starts it, then
+        // advance to the next pending tool or transition to Executing.
         KeyCode::Char('y') => {
-            if let Some(tool_call) = find_tool_call_by_id(state, tool_id) {
+            state.pending_tools.remove(&current_tool_id);
+
+            if let Some(tool_call) = find_tool_call_by_id(state, &current_tool_id) {
+                state.approved_tools.insert(current_tool_id);
                 effects.push(Effect::ExecuteTool(tool_call));
-                state.mode = Mode::Normal;
-                state.status = StatusLine {
-                    text: "Executing tool...".to_string(),
-                    kind: StatusKind::Streaming,
-                };
             } else {
-                state.mode = Mode::Normal;
                 state.status = StatusLine {
                     text: "Internal error: tool call not found".to_string(),
                     kind: StatusKind::Error,
                 };
+                return;
             }
+
+            advance_tool_approval(state, effects);
         }
 
-        // Deny the tool call. We emit a DenyTool effect so the runner
-        // can construct a "tool denied by user" result and send it back
-        // to the API. The model will see that the tool was denied and
-        // can decide how to proceed (usually it will try a different
-        // approach or explain what it wanted to do).
+        // Deny the current tool. Remove from pending (but don't add
+        // to approved), emit DenyTool so the runner records the denial,
+        // then advance.
         KeyCode::Char('n') => {
-            effects.push(Effect::DenyTool(tool_id.clone()));
-            state.mode = Mode::Normal;
-            state.status = StatusLine::default();
+            state.pending_tools.remove(&current_tool_id);
+            effects.push(Effect::DenyTool(current_tool_id));
+            advance_tool_approval(state, effects);
         }
 
-        // Allow quitting even while a tool approval is pending. The
-        // user shouldn't be trapped in approval mode if they want to
-        // exit the application.
+        // Allow quitting even while tool approvals are pending.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.mode = Mode::Quitting;
+            state.pending_tools.clear();
+            state.approved_tools.clear();
             effects.push(Effect::Quit);
         }
 
-        // All other keys are ignored — only y, n, and Ctrl+C are
-        // valid in tool approval mode. This prevents accidental
-        // approval/denial from stray keypresses.
+        // All other keys are ignored.
         _ => {}
+    }
+}
+
+/// After approving or denying a tool, check if more are pending.
+/// If so, update the status to show the next one. If not, transition
+/// to Executing mode. If nothing was approved (all denied), send
+/// the denial results immediately.
+fn advance_tool_approval(state: &mut AppState, effects: &mut Vec<Effect>) {
+    if !state.pending_tools.is_empty() {
+        // More tools to review.
+        state.status = StatusLine {
+            text: "Tool call pending approval (y/n)".to_string(),
+            kind: StatusKind::Info,
+        };
+    } else if state.approved_tools.is_empty() {
+        // All tools were denied (none approved). Transition to
+        // Executing mode. The runner will process DenyTool effects,
+        // deliver synthetic ToolResult events through update(), and
+        // the ToolResult handler will emit SendMessage when all
+        // denial results have been added to the conversation.
+        //
+        // We do NOT emit SendMessage here — that would race with
+        // the DenyTool effects that haven't been processed yet.
+        // The TLA+ RunnerLoop model (spec/RunnerLoop.tla) verified
+        // that this ordering is necessary.
+        state.mode = Mode::Executing;
+        state.status = StatusLine {
+            text: "Processing tool results...".to_string(),
+            kind: StatusKind::Streaming,
+        };
+    } else {
+        // Some tools were approved. Wait for their results in
+        // Executing mode. The runner will feed ToolResult events
+        // back as each tool finishes.
+        state.mode = Mode::Executing;
+        state.status = StatusLine {
+            text: "Executing tools...".to_string(),
+            kind: StatusKind::Streaming,
+        };
     }
 }
 

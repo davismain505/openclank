@@ -424,7 +424,7 @@ fn api_tool_use_enters_approval_on_done() {
     // first tool-use block in the finalized message.
     let (state, _) = update(state, AppEvent::ApiDone);
 
-    assert_eq!(state.mode, Mode::ToolApproval(tool_id.clone()));
+    assert_eq!(state.mode, Mode::ToolApproval);
     assert!(state.conversation.draft().is_none());
     assert_eq!(state.conversation.messages().len(), 1);
 
@@ -450,12 +450,15 @@ fn approving_tool_emits_execute_effect() {
         },
     );
     let (state, _) = update(state, AppEvent::ApiDone);
-    assert_eq!(state.mode, Mode::ToolApproval(tool_id.clone()));
+    assert_eq!(state.mode, Mode::ToolApproval);
 
-    // Press 'y' to approve.
+    // Press 'y' to approve. With one tool in the batch, approving
+    // it empties pending_tools and transitions to Executing.
     let (state, effects) = update(state, key(KeyCode::Char('y')));
 
-    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.mode, Mode::Executing);
+    assert!(state.pending_tools.is_empty());
+    assert!(state.approved_tools.contains(&tool_id));
     assert_eq!(effects.len(), 1);
     match &effects[0] {
         Effect::ExecuteTool(tool_call) => {
@@ -482,10 +485,18 @@ fn denying_tool_emits_deny_effect() {
     );
     let (state, _) = update(state, AppEvent::ApiDone);
 
-    // Press 'n' to deny.
+    // Press 'n' to deny. With one tool in the batch, denying it
+    // empties pending_tools with no approved tools. The mode
+    // transitions to Executing (not Normal) — the runner must
+    // process the DenyTool effect, deliver the synthetic ToolResult
+    // through update(), and *that* will emit SendMessage. We do NOT
+    // get SendMessage here because of the ordering constraint
+    // verified by the RunnerLoop TLA+ model.
     let (state, effects) = update(state, key(KeyCode::Char('n')));
 
-    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.mode, Mode::Executing);
+    assert!(state.pending_tools.is_empty());
+    assert!(state.approved_tools.is_empty());
     assert_eq!(effects, vec![Effect::DenyTool(tool_id)]);
 }
 
@@ -493,7 +504,8 @@ fn denying_tool_emits_deny_effect() {
 fn ctrl_c_from_tool_approval_quits() {
     let mut state = AppState::default();
     let tool_id = ToolUseId::new("toolu_abc123").unwrap();
-    state.mode = Mode::ToolApproval(tool_id);
+    state.pending_tools.insert(tool_id);
+    state.mode = Mode::ToolApproval;
 
     let (state, effects) = update(
         state,
@@ -512,9 +524,12 @@ fn tool_result_adds_message_and_sends_to_api() {
     let tool_id = ToolUseId::new("toolu_abc123").unwrap();
 
     // Simulate the conversation having a user message and an assistant
-    // tool-use message already.
+    // tool-use message already, with the app in Executing mode waiting
+    // for this tool's result.
     state.conversation.push(Message::user("list files"));
     state.conversation.push(Message::assistant("Let me check."));
+    state.approved_tools.insert(tool_id.clone());
+    state.mode = Mode::Executing;
 
     let (state, effects) = update(
         state,

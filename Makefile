@@ -1,7 +1,15 @@
 HOST := root@omnios-big.local
 REMOTE_DIR := ~/openclank
 
-.PHONY: test test-live test-illumos test-illumos-live sync sync-credentials
+TLA_DIR := target/tla
+TLA_JAR := $(TLA_DIR)/tla2tools.jar
+TLA_VERSION := 1.7.4
+TLA_URL := https://github.com/tlaplus/tlaplus/releases/download/v$(TLA_VERSION)/tla2tools.jar
+
+SPEC_DIR := spec
+TLA_CHECKS := OpenClank RunnerLoop
+
+.PHONY: test test-live test-illumos test-illumos-live sync sync-credentials check
 
 test: test-local test-illumos
 
@@ -26,3 +34,14 @@ test-illumos: sync
 
 test-illumos-live: sync sync-credentials
 	ssh $(HOST) 'source ~/.zshrc && cd $(REMOTE_DIR) && gmake test-local-live'
+
+check: $(TLA_JAR)
+	@for spec in $(TLA_CHECKS); do \
+		echo "=== Checking $$spec ==="; \
+		java -jar $(TLA_JAR) -nowarning -metadir target/tla/states \
+			-config "$(SPEC_DIR)/$${spec}Test.cfg" "$(SPEC_DIR)/$${spec}.tla" || exit 1; \
+	done
+
+$(TLA_JAR):
+	@mkdir -p $(TLA_DIR)
+	curl -L -o $(TLA_JAR) $(TLA_URL)
