@@ -597,3 +597,166 @@ fn resize_updates_viewport() {
     assert_eq!(state.viewport.rows, 40);
     assert!(effects.is_empty());
 }
+
+// ─── Regression tests (feedback/6_missing_edge_case_tests.md) ────────
+//
+// These tests guard against regressions of the bugs found during the
+// code review in `feedback/`. Each test references the specific fix
+// or behavior it protects.
+
+/// 6.1 — A single API response can contain multiple tool-use blocks.
+/// All of them must end up in the finalized assistant message and in
+/// `pending_tools`. Previously, only the first tool call was preserved
+/// and later `ApiToolUse` events were silently dropped.
+#[test]
+fn multiple_tool_uses_in_one_response_all_preserved() {
+    let state = AppState::default();
+    let id1 = ToolUseId::new("toolu_first0000000000001").unwrap();
+    let id2 = ToolUseId::new("toolu_second000000000002").unwrap();
+
+    let (state, _) = update(state, AppEvent::ApiStreamStart);
+    let (state, _) = update(
+        state,
+        AppEvent::ApiToolUse {
+            id: id1.clone(),
+            name: ToolName::Bash,
+            input: serde_json::json!({"command": "ls"}),
+        },
+    );
+    let (state, _) = update(
+        state,
+        AppEvent::ApiToolUse {
+            id: id2.clone(),
+            name: ToolName::ReadFile,
+            input: serde_json::json!({"path": "/tmp"}),
+        },
+    );
+    let (state, _) = update(state, AppEvent::ApiDone);
+
+    // Both tool calls must be in the finalized assistant message.
+    let msg = state.conversation.messages().last().unwrap();
+    let tool_uses = msg.tool_uses();
+    assert_eq!(tool_uses.len(), 2);
+
+    // Both IDs must be in pending_tools for user approval.
+    assert_eq!(state.mode, Mode::ToolApproval);
+    assert_eq!(state.pending_tools.len(), 2);
+    assert!(state.pending_tools.contains(&id1));
+    assert!(state.pending_tools.contains(&id2));
+}
+
+/// 6.2 — `ApiToolUse` with no active draft must not enter ToolApproval
+/// mode or create a phantom tool call. Previously, this bug entered
+/// approval for a tool that didn't exist in the conversation.
+#[test]
+fn api_tool_use_without_stream_start_is_ignored() {
+    let state = AppState::default();
+    let tool_id = ToolUseId::new("toolu_nostream0000000001").unwrap();
+
+    let (state, effects) = update(
+        state,
+        AppEvent::ApiToolUse {
+            id: tool_id,
+            name: ToolName::Bash,
+            input: serde_json::json!({"command": "ls"}),
+        },
+    );
+
+    assert_eq!(state.mode, Mode::Normal);
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 0);
+    assert!(state.pending_tools.is_empty());
+    assert!(effects.is_empty());
+}
+
+/// 6.3 — `ApiTextDelta` with no active draft must be a silent no-op,
+/// not a crash. If text arrives before `ApiStreamStart`, we have no
+/// draft to append to.
+#[test]
+fn api_text_delta_without_stream_start_is_ignored() {
+    let state = AppState::default();
+
+    let (state, effects) = update(state, AppEvent::ApiTextDelta("hello".to_string()));
+
+    assert_eq!(state.mode, Mode::Normal);
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 0);
+    assert!(effects.is_empty());
+}
+
+/// 6.4 — `ApiDone` with no active draft must be a no-op, not a panic.
+/// `finalize_draft()` returns `None` when there's no draft.
+#[test]
+fn api_done_without_stream_start_is_noop() {
+    let state = AppState::default();
+
+    let (state, effects) = update(state, AppEvent::ApiDone);
+
+    assert_eq!(state.mode, Mode::Normal);
+    assert_eq!(state.conversation.messages().len(), 0);
+    assert!(state.pending_tools.is_empty());
+    assert!(effects.is_empty());
+}
+
+/// 6.5 — `ApiError` with no active draft must be safe.
+/// `discard_draft()` is a no-op when there's no draft.
+#[test]
+fn api_error_without_stream_start_is_safe() {
+    let state = AppState::default();
+
+    let (state, effects) = update(state, AppEvent::ApiError("boom".to_string()));
+
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 0);
+    assert_eq!(state.status.kind, StatusKind::Error);
+    assert!(effects.is_empty());
+}
+
+/// 6.6 — Tool approval when the ID doesn't match any message in the
+/// conversation. Previously this silently succeeded with no effect,
+/// leaving the app stuck waiting for a result that would never come.
+/// The fix shows an error status instead.
+#[test]
+fn tool_approval_with_missing_id_shows_error() {
+    let mut state = AppState::default();
+    let phantom_id = ToolUseId::new("toolu_phantom00000000001").unwrap();
+
+    // Set up ToolApproval mode with an ID that isn't in the conversation.
+    state.pending_tools.insert(phantom_id);
+    state.mode = Mode::ToolApproval;
+
+    let (state, effects) = update(state, key(KeyCode::Char('y')));
+
+    // The mode should transition out of ToolApproval, but no
+    // ExecuteTool effect should be emitted (there's nothing to execute).
+    assert_ne!(state.mode, Mode::ToolApproval);
+    assert_eq!(state.status.kind, StatusKind::Error);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::ExecuteTool(_))),
+        "no ExecuteTool effect should be emitted for a missing tool ID"
+    );
+}
+
+/// 6.7 — Calling `start_draft` while a draft already exists panics.
+/// This is an explicit invariant check in `Conversation::start_draft`.
+#[test]
+#[should_panic(expected = "cannot start a new draft")]
+fn start_draft_while_draft_exists_panics() {
+    use openclank::state::message::Conversation;
+
+    let mut conv = Conversation::default();
+    conv.start_draft();
+    conv.start_draft(); // should panic
+}
+
+/// 6.25 — `ToolUseId` deserialization rejects strings without the
+/// `toolu_` prefix. The custom `Deserialize` impl routes through
+/// `ToolUseId::new()` which validates the prefix.
+#[test]
+fn tool_use_id_deserialize_rejects_invalid_prefix() {
+    let result: Result<ToolUseId, _> = serde_json::from_str("\"invalid_id\"");
+    assert!(result.is_err(), "deserializing 'invalid_id' should fail");
+
+    let result: Result<ToolUseId, _> = serde_json::from_str("\"toolu_valid12345\"");
+    assert!(result.is_ok(), "valid toolu_ prefix should deserialize");
+}

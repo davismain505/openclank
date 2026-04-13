@@ -417,15 +417,21 @@ fn handle_tool_approval_key(
             if let Some(tool_call) = find_tool_call_by_id(state, &current_tool_id) {
                 state.approved_tools.insert(current_tool_id);
                 effects.push(Effect::ExecuteTool(tool_call));
+                advance_tool_approval(state);
             } else {
+                // The tool ID in pending_tools doesn't match any message
+                // in the conversation. This indicates a bug in state
+                // management. Show an error and transition out of
+                // ToolApproval so the user isn't stuck. We must still
+                // drain pending_tools to maintain the mode invariant.
+                state.pending_tools.clear();
+                state.approved_tools.clear();
+                state.mode = Mode::Normal;
                 state.status = StatusLine {
                     text: "Internal error: tool call not found".to_string(),
                     kind: StatusKind::Error,
                 };
-                return;
             }
-
-            advance_tool_approval(state, effects);
         }
 
         // Deny the current tool. Remove from pending (but don't add
@@ -434,7 +440,7 @@ fn handle_tool_approval_key(
         KeyCode::Char('n') => {
             state.pending_tools.remove(&current_tool_id);
             effects.push(Effect::DenyTool(current_tool_id));
-            advance_tool_approval(state, effects);
+            advance_tool_approval(state);
         }
 
         // Allow quitting even while tool approvals are pending.
@@ -451,10 +457,11 @@ fn handle_tool_approval_key(
 }
 
 /// After approving or denying a tool, check if more are pending.
-/// If so, update the status to show the next one. If not, transition
-/// to Executing mode. If nothing was approved (all denied), send
-/// the denial results immediately.
-fn advance_tool_approval(state: &mut AppState, effects: &mut Vec<Effect>) {
+/// If so, update the status to show the next one. Otherwise
+/// transition to Executing mode, where the runner waits for tool
+/// results (for approved tools) or delivers synthetic denial
+/// results (for denied tools) before the conversation is sent.
+fn advance_tool_approval(state: &mut AppState) {
     if !state.pending_tools.is_empty() {
         // More tools to review.
         state.status = StatusLine {
