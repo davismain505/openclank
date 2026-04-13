@@ -63,7 +63,7 @@ pub fn render_tool_approval(
 /// Search the conversation for the tool call matching `tool_id` and
 /// return its display name and a one-line summary of its arguments.
 fn find_tool_info(state: &AppState, tool_id: &ToolUseId) -> Option<(String, String)> {
-    for msg in state.conversation.messages.iter().rev() {
+    for msg in state.conversation.messages().iter().rev() {
         for block in msg.content() {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
@@ -72,32 +72,10 @@ fn find_tool_info(state: &AppState, tool_id: &ToolUseId) -> Option<(String, Stri
                 continue;
             }
 
-            let summary = match name {
-                // bash: show the command — the most important detail
-                // for the user to review before approving.
-                crate::state::message::ToolName::Bash => input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-
-                // File operations: show the path.
-                crate::state::message::ToolName::ReadFile
-                | crate::state::message::ToolName::WriteFile
-                | crate::state::message::ToolName::EditFile => input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-
-                // Search tools: show the pattern.
-                crate::state::message::ToolName::Glob
-                | crate::state::message::ToolName::Grep => input
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            };
+            // Use the shared format_tool_input function so the approval
+            // prompt shows the same summary as the chat history, including
+            // "(write)"/"(edit)" suffixes for destructive operations.
+            let summary = super::format_tool_input(*name, input);
 
             return Some((name.to_string(), summary));
         }

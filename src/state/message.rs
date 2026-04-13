@@ -32,8 +32,26 @@ use std::fmt;
 ///
 /// A [`ContentBlock::ToolResult`] must reference the same `ToolUseId` as
 /// the [`ContentBlock::ToolUse`] it responds to.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The `Deserialize` impl uses `try_from` to validate the `toolu_` prefix,
+/// so deserializing an invalid ID produces an error rather than silently
+/// bypassing validation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(try_from = "String")]
 pub struct ToolUseId(String);
+
+impl TryFrom<String> for ToolUseId {
+    type Error = ToolUseIdError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolUseId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        ToolUseId::new(s).map_err(|e| serde::de::Error::custom(e.to_string()))
+    }
+}
 
 impl ToolUseId {
     /// The required prefix for all Anthropic tool-use IDs.
@@ -149,6 +167,19 @@ pub enum Role {
 /// text interspersed with tool-use requests. We mirror that structure here
 /// so that the conversation can be serialized back to the API without
 /// lossy transformation.
+///
+/// ## Ordering constraints
+///
+/// - `Text` blocks can appear in both `User` and `Assistant` messages.
+/// - `ToolUse` blocks only appear in `Assistant` messages (the model
+///   requests tools).
+/// - `ToolResult` blocks only appear in `User` messages (the
+///   environment returns results).
+/// - Every `ToolResult.tool_use_id` must match a `ToolUse.id` from a
+///   preceding assistant message.
+///
+/// These constraints are not enforced by the type system — they are
+/// maintained by the update function's control flow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContentBlock {
     /// Plain text content — the most common block type for both user and
@@ -370,15 +401,31 @@ pub struct Conversation {
     /// Finalized messages in chronological order. User and assistant messages
     /// alternate, with tool-result messages inserted between assistant
     /// turns when the model uses tools.
-    pub messages: Vec<Message>,
+    messages: Vec<Message>,
 
     /// The currently-streaming assistant response, if any. At most one draft
     /// exists at a time. When streaming completes, this is finalized and
     /// pushed onto `messages`.
-    pub draft: Option<MessageDraft>,
+    draft: Option<MessageDraft>,
 }
 
 impl Conversation {
+    /// Read-only access to all finalized messages.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Read-only access to the in-progress draft, if any.
+    pub fn draft(&self) -> Option<&MessageDraft> {
+        self.draft.as_ref()
+    }
+
+    /// Mutable access to the in-progress draft, if any. Used during
+    /// streaming to append text chunks and tool-use blocks.
+    pub fn draft_mut(&mut self) -> Option<&mut MessageDraft> {
+        self.draft.as_mut()
+    }
+
     /// Add a finalized message to the end of the conversation.
     pub fn push(&mut self, msg: Message) {
         self.messages.push(msg);

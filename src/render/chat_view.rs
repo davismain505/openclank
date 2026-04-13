@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::state::app::AppState;
-use crate::state::message::{ContentBlock, Message, Role, ToolName};
+use crate::state::message::{ContentBlock, Message, Role};
 
 /// Render the chat history into the given area.
 ///
@@ -30,7 +30,7 @@ pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Render each finalized message.
-    for msg in &state.conversation.messages {
+    for msg in state.conversation.messages() {
         render_message_lines(&mut lines, msg);
         lines.push(Line::default()); // blank line between messages
     }
@@ -38,7 +38,7 @@ pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
     // Render the in-progress draft if one exists. The draft shows
     // partial content as it streams in, giving the user real-time
     // feedback that the model is responding.
-    if let Some(draft) = &state.conversation.draft {
+    if let Some(draft) = state.conversation.draft() {
         let prefix = Span::styled(
             "Claude: ",
             Style::default()
@@ -72,11 +72,16 @@ pub fn render_chat(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Compute scroll position. scroll_offset is "lines from the bottom"
     // (0 = show latest). Ratatui's Paragraph::scroll takes "lines from
-    // the top", so we convert: top_scroll = max_scroll - offset.
-    let total_lines = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2); // subtract border rows
+    // the top", so we convert: top_scroll = max_scroll - clamped_offset.
+    //
+    // All arithmetic is done in usize to avoid truncation bugs (the
+    // scroll_offset can be usize::MAX from the 'g' key). The final
+    // cast to u16 happens after clamping to a value that fits.
+    let total_lines = lines.len();
+    let visible_height = area.height.saturating_sub(2) as usize;
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll_from_top = max_scroll.saturating_sub(state.scroll_offset as u16);
+    let clamped_offset = state.scroll_offset.min(max_scroll);
+    let scroll_from_top = max_scroll.saturating_sub(clamped_offset) as u16;
 
     let block = Block::default().borders(Borders::ALL).title(" Chat ");
     let paragraph = Paragraph::new(lines)
@@ -162,7 +167,7 @@ fn render_message_lines(lines: &mut Vec<Line>, msg: &Message) {
                 // Show the most relevant field from the tool's arguments,
                 // rendered in dim gray so it doesn't compete with the
                 // main conversation text.
-                let input_str = format_tool_input(*name, input);
+                let input_str = super::format_tool_input(*name, input);
                 for input_line in input_str.lines() {
                     lines.push(Line::from(vec![
                         Span::raw(indent.clone()),
@@ -222,60 +227,7 @@ fn render_message_lines(lines: &mut Vec<Line>, msg: &Message) {
     }
 }
 
-/// Format tool input for display based on the tool type. Uses the
-/// [`ToolName`] enum so the compiler ensures every tool is handled.
-/// Shows the most relevant field so the user can quickly see what
-/// the tool will do without parsing raw JSON.
-fn format_tool_input(tool: ToolName, input: &serde_json::Value) -> String {
-    match tool {
-        // bash: show the command string, which is the whole point.
-        ToolName::Bash => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
 
-        // read_file: show the file path being read.
-        ToolName::ReadFile => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-
-        // write_file: show the path with a "(write)" suffix so it's
-        // clear this is a destructive operation.
-        ToolName::WriteFile => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("{path} (write)")
-        }
-
-        // edit_file: show the path with an "(edit)" suffix.
-        ToolName::EditFile => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("{path} (edit)")
-        }
-
-        // glob: show the search pattern.
-        ToolName::Glob => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-
-        // grep: show the search pattern.
-        ToolName::Grep => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    }
-}
 
 /// Truncate a multi-line string to at most `max_lines` lines. If
 /// truncated, appends a "... (N more lines)" indicator so the user
@@ -350,7 +302,7 @@ mod tests {
         let mut state = AppState::default();
         state.conversation.push(Message::user("hello"));
         state.conversation.start_draft();
-        state.conversation.draft.as_mut().unwrap().append_text("Working on it");
+        state.conversation.draft_mut().unwrap().append_text("Working on it");
         let output = render_to_string(&state, 40, 10);
         insta::assert_snapshot!(output);
     }

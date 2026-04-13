@@ -38,7 +38,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let block = Block::default().borders(Borders::ALL).title(title);
-    let paragraph = Paragraph::new(state.input_buffer.as_str())
+    let paragraph = Paragraph::new(state.input.text())
         .block(block)
         .style(style)
         .wrap(Wrap { trim: false });
@@ -52,7 +52,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
     if state.mode == Mode::Normal {
         // For multi-line input, find which line and column the cursor is
         // on by splitting the text before the cursor on newlines.
-        let text_before = &state.input_buffer[..state.cursor_pos];
+        let text_before = &state.input.text()[..state.input.cursor()];
         let lines: Vec<&str> = text_before.split('\n').collect();
         let cursor_row = lines.len() - 1;
         let cursor_col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
@@ -107,8 +107,9 @@ mod tests {
     #[test]
     fn input_with_text() {
         let mut state = AppState::default();
-        state.input_buffer = "hello world".to_string();
-        state.cursor_pos = 11;
+        for c in "hello world".chars() {
+            state.input.insert_char(c);
+        }
         let output = render_to_string(&state, 30, 3);
         insta::assert_snapshot!(output);
     }
@@ -129,7 +130,9 @@ mod tests {
     fn scrolling_mode_dims_text_to_dark_gray() {
         let mut state = AppState::default();
         state.mode = Mode::Scrolling;
-        state.input_buffer = "some text".to_string();
+        for c in "some text".chars() {
+            state.input.insert_char(c);
+        }
 
         let backend = TestBackend::new(40, 3);
         let mut terminal = Terminal::new(backend).unwrap();

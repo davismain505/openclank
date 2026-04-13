@@ -1,9 +1,15 @@
-//! Real Anthropic Messages API backend with SSE streaming.
+//! Real Anthropic Messages API backend with SSE response parsing.
 //!
 //! This module implements [`ChatBackend`] by making HTTP requests to the
 //! Anthropic Messages API (`https://api.anthropic.com/v1/messages`). It
 //! uses reqwest with rustls for TLS (no system OpenSSL dependency) and
-//! parses Server-Sent Events (SSE) from the streaming response.
+//! parses Server-Sent Events (SSE) from the response.
+//!
+//! **Note:** The current implementation buffers the full response body
+//! before parsing SSE events, so events arrive as a batch rather than
+//! incrementally. This means the UI won't show text appearing
+//! token-by-token against the real API. Incremental byte-stream parsing
+//! would fix this but adds complexity around partial-event handling.
 //!
 //! ## Authentication
 //!
@@ -412,88 +418,194 @@ impl ChatBackend for AnthropicBackend {
     }
 }
 
+/// A tool-use block being accumulated from the SSE stream.
+///
+/// Per the Anthropic streaming docs
+/// (https://platform.claude.com/docs/en/api/streaming#input-json-delta),
+/// tool calls arrive in three phases:
+///
+/// 1. `content_block_start` with the tool ID and name but `input: {}`
+/// 2. One or more `input_json_delta` events with partial JSON strings
+/// 3. `content_block_stop` signaling the tool call is complete
+///
+/// We hold the metadata from phase 1 here and accumulate the partial
+/// JSON strings from phase 2. On phase 3 we parse the accumulated JSON
+/// and emit `BackendEvent::ToolUse` with the complete input.
+struct PendingToolCall {
+    /// The API-assigned tool call ID.
+    id: ToolUseId,
+    /// Which tool the model wants to invoke.
+    name: ToolName,
+    /// Accumulated partial JSON strings from `input_json_delta` events.
+    /// Concatenated together, these form the complete JSON input object.
+    input_json: String,
+}
+
 /// Parse a raw SSE response body into a list of [`BackendEvent`]s.
 ///
-/// SSE format: each event is one or more lines starting with `event: `
-/// or `data: `, separated by blank lines. We care about:
-/// - `content_block_delta` with `text_delta` — text chunk
-/// - `content_block_start` with `tool_use` — tool call
-/// - `message_stop` — end of response
+/// Per the Anthropic streaming docs
+/// (https://platform.claude.com/docs/en/api/streaming#event-types),
+/// a stream has this structure:
 ///
-/// Events we don't care about (like `message_start`, `ping`) are ignored.
+/// 1. `message_start` — contains a Message with empty content
+/// 2. A series of content blocks, each consisting of:
+///    - `content_block_start`
+///    - One or more `content_block_delta` events
+///    - `content_block_stop`
+/// 3. `message_delta` — top-level changes (stop_reason, usage)
+/// 4. `message_stop`
+///
+/// Content blocks are sequential: each completes with
+/// `content_block_stop` before the next starts. Multiple blocks
+/// (e.g. a text block followed by a tool_use block) can exist in
+/// one response.
+///
+/// We emit:
+/// - `BackendEvent::TextDelta` for each `text_delta`
+/// - `BackendEvent::ToolUse` on `content_block_stop` for tool_use blocks
+///   (after accumulating `input_json_delta` partials)
+/// - `BackendEvent::Done` on `message_stop`
 fn parse_sse_events(body: &str) -> Vec<BackendEvent> {
     let mut events = Vec::new();
     let mut current_event_type = String::new();
-    let mut current_data = String::new();
+
+    // Tracks a tool-use block being assembled from streaming events.
+    // At most one tool call is in-flight at a time because the API
+    // sends content blocks sequentially (each completed by
+    // content_block_stop before the next content_block_start).
+    let mut pending_tool: Option<PendingToolCall> = None;
 
     for line in body.lines() {
         if let Some(event_type) = line.strip_prefix("event: ") {
             current_event_type = event_type.trim().to_string();
-            current_data.clear();
-        } else if let Some(data) = line.strip_prefix("data: ") {
-            current_data = data.trim().to_string();
+            continue;
+        }
 
-            // Process the event now that we have both type and data.
-            if let Some(event) = parse_single_sse_event(&current_event_type, &current_data) {
-                events.push(event);
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let data = data.trim();
+
+        match current_event_type.as_str() {
+            // A new content block is starting. For text blocks we don't
+            // need to do anything — the text arrives via text_delta. For
+            // tool_use blocks we capture the ID and name and start
+            // accumulating the input JSON. The `input` field in
+            // content_block_start is always `{}` for tool_use blocks;
+            // the real input arrives via input_json_delta events.
+            "content_block_start" => {
+                let Some(parsed) = serde_json::from_str::<serde_json::Value>(data).ok() else {
+                    continue;
+                };
+                let Some(block) = parsed.get("content_block") else {
+                    continue;
+                };
+                let Some(block_type) = block.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+
+                if block_type == "tool_use" {
+                    let id_str = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let name_str = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = match ToolUseId::new(id_str) {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    };
+                    let name = match ToolName::from_str(name_str) {
+                        Some(name) => name,
+                        None => continue,
+                    };
+                    pending_tool = Some(PendingToolCall {
+                        id,
+                        name,
+                        input_json: String::new(),
+                    });
+                }
             }
+
+            // A delta for an in-progress content block. Text deltas are
+            // emitted immediately. Input JSON deltas are appended to the
+            // pending tool call's accumulator.
+            "content_block_delta" => {
+                let Some(parsed) = serde_json::from_str::<serde_json::Value>(data).ok() else {
+                    continue;
+                };
+                let Some(delta) = parsed.get("delta") else {
+                    continue;
+                };
+                let Some(delta_type) = delta.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+
+                match delta_type {
+                    // A chunk of text from the model's response. Emitted
+                    // immediately so the runner can update the UI
+                    // incrementally.
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                            events.push(BackendEvent::TextDelta(text.to_string()));
+                        }
+                    }
+
+                    // A fragment of the tool call's JSON arguments. Per
+                    // the docs: "the deltas are partial JSON strings,
+                    // whereas the final tool_use.input is always an
+                    // object. You can accumulate the string deltas and
+                    // parse the JSON once you receive a
+                    // content_block_stop event."
+                    "input_json_delta" => {
+                        if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                            if let Some(tool) = &mut pending_tool {
+                                tool.input_json.push_str(partial);
+                            }
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+
+            // A content block has finished. If we have a pending tool
+            // call, this means all input_json_delta events have been
+            // received and we can parse the accumulated JSON into the
+            // complete input object.
+            "content_block_stop" => {
+                if let Some(tool) = pending_tool.take() {
+                    let input = if tool.input_json.is_empty() {
+                        // No input_json_delta events arrived — the tool
+                        // call has no arguments (e.g. a tool with no
+                        // parameters).
+                        serde_json::Value::Object(Default::default())
+                    } else {
+                        serde_json::from_str(&tool.input_json)
+                            .unwrap_or(serde_json::Value::Object(Default::default()))
+                    };
+                    events.push(BackendEvent::ToolUse {
+                        id: tool.id,
+                        name: tool.name,
+                        input,
+                    });
+                }
+            }
+
+            // The entire message is complete. No more events will follow.
+            "message_stop" => {
+                events.push(BackendEvent::Done);
+            }
+
+            // Events we ignore: message_start, message_delta (contains
+            // stop_reason and usage stats), ping.
+            _ => {}
         }
     }
 
-    // Always end with Done if we got any events, so the update
+    // If we got events but no explicit Done, add one so the update
     // function knows streaming is complete.
-    if !events.is_empty() {
-        if !matches!(events.last(), Some(BackendEvent::Done)) {
-            events.push(BackendEvent::Done);
-        }
+    if !events.is_empty() && !matches!(events.last(), Some(BackendEvent::Done)) {
+        events.push(BackendEvent::Done);
     }
 
     events
-}
-
-/// Parse a single SSE event (type + data JSON) into a [`BackendEvent`].
-/// Returns `None` for event types we don't handle.
-fn parse_single_sse_event(event_type: &str, data: &str) -> Option<BackendEvent> {
-    match event_type {
-        "content_block_delta" => {
-            let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
-            let delta = parsed.get("delta")?;
-            let delta_type = delta.get("type")?.as_str()?;
-
-            match delta_type {
-                "text_delta" => {
-                    let text = delta.get("text")?.as_str()?;
-                    Some(BackendEvent::TextDelta(text.to_string()))
-                }
-                "input_json_delta" => None,
-                _ => None,
-            }
-        }
-
-        "content_block_start" => {
-            let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
-            let block = parsed.get("content_block")?;
-            let block_type = block.get("type")?.as_str()?;
-
-            if block_type == "tool_use" {
-                let id_str = block.get("id")?.as_str()?;
-                let id = ToolUseId::new(id_str).ok()?;
-                let name_str = block.get("name")?.as_str()?;
-                let name = ToolName::from_str(name_str)?;
-                let input = block
-                    .get("input")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                Some(BackendEvent::ToolUse { id, name, input })
-            } else {
-                None
-            }
-        }
-
-        "message_stop" => Some(BackendEvent::Done),
-
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -502,22 +614,7 @@ mod tests {
 
     #[test]
     fn parse_text_streaming_response() {
-        let body = "\
-event: message_start\n\
-data: {\"type\":\"message_start\"}\n\
-\n\
-event: content_block_start\n\
-data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
-\n\
-event: content_block_delta\n\
-data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\
-\n\
-event: content_block_delta\n\
-data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\
-\n\
-event: message_stop\n\
-data: {\"type\":\"message_stop\"}\n";
-
+        let body = include_str!("test_fixtures/text_streaming.sse");
         let events = parse_sse_events(body);
 
         assert_eq!(events.len(), 3);
@@ -532,40 +629,76 @@ data: {\"type\":\"message_stop\"}\n";
         assert!(matches!(events[2], BackendEvent::Done));
     }
 
+    /// Realistic tool-use SSE sequence: content_block_start has empty
+    /// input, the real arguments arrive via input_json_delta events,
+    /// and content_block_stop triggers the ToolUse emission with the
+    /// fully assembled input.
     #[test]
-    fn parse_tool_use_response() {
-        let body = "\
-event: content_block_start\n\
-data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_abc123\",\"name\":\"bash\",\"input\":{}}}\n\
-\n\
-event: message_stop\n\
-data: {\"type\":\"message_stop\"}\n";
-
+    fn parse_tool_use_with_streamed_input() {
+        let body = include_str!("test_fixtures/tool_use_streamed_input.sse");
         let events = parse_sse_events(body);
 
         assert_eq!(events.len(), 2);
         match &events[0] {
-            BackendEvent::ToolUse { id, name, .. } => {
+            BackendEvent::ToolUse { id, name, input } => {
                 assert_eq!(id.as_str(), "toolu_abc123");
                 assert_eq!(*name, ToolName::Bash);
+                assert_eq!(
+                    input.get("command").and_then(|v| v.as_str()),
+                    Some("ls -la"),
+                    "tool input should contain the assembled command"
+                );
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
         assert!(matches!(events[1], BackendEvent::Done));
     }
 
+    /// Tool-use block with no input_json_delta events (a tool with no
+    /// parameters). The ToolUse should still be emitted with an empty
+    /// input object on content_block_stop.
+    #[test]
+    fn parse_tool_use_with_no_input() {
+        let body = include_str!("test_fixtures/tool_use_no_input.sse");
+        let events = parse_sse_events(body);
+
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            BackendEvent::ToolUse { id, name, input } => {
+                assert_eq!(id.as_str(), "toolu_noinput");
+                assert_eq!(*name, ToolName::Bash);
+                assert!(input.as_object().unwrap().is_empty());
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// A response with text followed by a tool call — both content
+    /// blocks in the same message, sequential per the API spec.
+    #[test]
+    fn parse_text_then_tool_use() {
+        let body = include_str!("test_fixtures/text_then_tool_use.sse");
+        let events = parse_sse_events(body);
+
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            BackendEvent::TextDelta(t) => assert_eq!(t, "Let me check."),
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+        match &events[1] {
+            BackendEvent::ToolUse { id, name, input } => {
+                assert_eq!(id.as_str(), "toolu_mixed");
+                assert_eq!(*name, ToolName::Bash);
+                assert_eq!(input.get("command").and_then(|v| v.as_str()), Some("whoami"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        assert!(matches!(events[2], BackendEvent::Done));
+    }
+
     #[test]
     fn parse_ignores_unknown_events() {
-        let body = "\
-event: ping\n\
-data: {}\n\
-\n\
-event: content_block_delta\n\
-data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\
-\n\
-event: message_stop\n\
-data: {\"type\":\"message_stop\"}\n";
-
+        let body = include_str!("test_fixtures/ping_interleaved.sse");
         let events = parse_sse_events(body);
 
         assert_eq!(events.len(), 2);

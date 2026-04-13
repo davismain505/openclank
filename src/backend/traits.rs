@@ -44,9 +44,15 @@ pub enum BackendEvent {
 pub struct BackendError {
     /// A human-readable description of what went wrong.
     pub message: String,
-    /// Whether this error is likely transient and worth retrying
-    /// (e.g. rate limiting, network timeout) vs. permanent
-    /// (e.g. invalid API key, malformed request).
+    /// Whether this error is likely transient and worth retrying.
+    ///
+    /// The runner should implement retry with exponential backoff for
+    /// retryable errors (up to ~3 attempts). Non-retryable errors
+    /// should be shown to the user immediately without retry.
+    ///
+    /// Retryable: rate limiting (429), network timeouts, server
+    /// errors (5xx). Non-retryable: auth failures (401/403), bad
+    /// requests (400).
     pub retryable: bool,
 }
 
@@ -67,6 +73,12 @@ pub trait ChatBackend: Send + Sync {
     /// should be sent to the API. The returned stream yields events as
     /// the model generates its response, ending with a `Done` event on
     /// success or a `BackendError` on failure.
+    ///
+    /// **Lifetime note:** The returned stream borrows both `self` and
+    /// `messages` (shared lifetime `'a`). Both must remain valid for
+    /// the entire time the stream is being consumed. In practice, this
+    /// means you cannot drop or modify the conversation while iterating
+    /// the stream.
     fn send<'a>(
         &'a self,
         messages: &'a [Message],

@@ -95,41 +95,55 @@ pub fn update(mut state: AppState, event: AppEvent) -> (AppState, Vec<Effect>) {
         // draft's accumulated content, so the user sees text appear
         // incrementally as it streams in.
         AppEvent::ApiTextDelta(chunk) => {
-            if let Some(draft) = &mut state.conversation.draft {
+            if let Some(draft) = state.conversation.draft_mut() {
                 draft.append_text(&chunk);
             }
         }
 
-        // The model emitted a tool-use request during streaming. This
-        // means the model wants to execute a tool before continuing its
-        // response. We:
-        // 1. Add the tool-use block to the draft
-        // 2. Finalize the draft into an immutable message (so it's visible
-        //    in the conversation history)
-        // 3. Enter ToolApproval mode so the user can review and approve/deny
+        // The model emitted a tool-use request during streaming. We
+        // add it to the draft but do NOT finalize or enter approval
+        // yet — the API can send multiple tool-use blocks in a single
+        // response (each as a separate content block), and we need to
+        // collect them all before presenting them to the user.
         //
-        // The conversation is paused at this point — the model won't
-        // continue until we send back a tool result.
+        // Approval happens in the ApiDone handler below, after the
+        // draft is finalized and we can see all tool calls at once.
         AppEvent::ApiToolUse { id, name, input } => {
-            if let Some(draft) = &mut state.conversation.draft {
-                draft.add_tool_use(id.clone(), name, input);
+            if let Some(draft) = state.conversation.draft_mut() {
+                draft.add_tool_use(id, name, input);
             }
-            state.conversation.finalize_draft();
-            state.mode = Mode::ToolApproval(id);
-            state.status = StatusLine {
-                text: "Tool call pending approval (y/n)".to_string(),
-                kind: StatusKind::Info,
-            };
         }
 
-        // The API stream has finished without requesting any tools. The
-        // model's response is complete. We finalize the draft into an
-        // immutable message and return to the ready state. Scroll offset
-        // is reset to 0 so the user sees the latest message.
+        // The API stream has finished (message_stop event). Finalize
+        // the draft into an immutable message.
+        //
+        // If the finalized message contains tool-use blocks, enter
+        // ToolApproval mode for the first one. The user will approve
+        // or deny each tool call in sequence. If no tool-use blocks
+        // exist, return to the ready state.
         AppEvent::ApiDone => {
             state.conversation.finalize_draft();
-            state.status = StatusLine::default();
             state.scroll_offset = 0;
+
+            // Check if the most recent message has tool-use blocks.
+            let first_tool_id = state
+                .conversation
+                .messages()
+                .last()
+                .and_then(|msg| {
+                    let uses = msg.tool_uses();
+                    uses.first().map(|(_, id, _, _)| (*id).clone())
+                });
+
+            if let Some(tool_id) = first_tool_id {
+                state.mode = Mode::ToolApproval(tool_id);
+                state.status = StatusLine {
+                    text: "Tool call pending approval (y/n)".to_string(),
+                    kind: StatusKind::Info,
+                };
+            } else {
+                state.status = StatusLine::default();
+            }
         }
 
         // The API stream encountered an error (network failure, rate
@@ -168,9 +182,9 @@ pub fn update(mut state: AppState, event: AppEvent) -> (AppState, Vec<Effect>) {
             effects.push(Effect::SendMessage);
         }
 
-        // A periodic tick for UI animations. Currently unused, but
-        // reserved for future features like cycling spinner frames
-        // on the streaming indicator, or blinking the cursor.
+        // Periodic tick (e.g. every 100ms) for UI animations.
+        // Currently a no-op; intended for streaming spinner or cursor
+        // blink. Requires a timer in the runner (not yet implemented).
         AppEvent::Tick => {}
     }
 
@@ -208,15 +222,12 @@ fn handle_normal_mode_key(
         // Send the current input as a user message. We trim whitespace
         // and skip empty inputs. After sending:
         // - The input buffer is cleared for the next message
-        // - The cursor resets to position 0
         // - Scroll offset resets so we see the latest messages
         // - A SendMessage effect is emitted so the runner calls the API
         (KeyCode::Enter, KeyModifiers::NONE) => {
-            let text = state.input_buffer.trim().to_string();
-            if !text.is_empty() {
+            if !state.input.is_blank() {
+                let text = state.input.take_trimmed();
                 state.conversation.push(Message::user(&text));
-                state.input_buffer.clear();
-                state.cursor_pos = 0;
                 state.scroll_offset = 0;
                 state.status = StatusLine {
                     text: "Sending...".to_string(),
@@ -230,58 +241,37 @@ fn handle_normal_mode_key(
         // messages. Shift+Enter and Alt+Enter are both supported because
         // terminal emulators vary in which modifier they can send.
         (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Enter, KeyModifiers::ALT) => {
-            state.input_buffer.insert(state.cursor_pos, '\n');
-            state.cursor_pos += 1;
+            state.input.insert_char('\n');
         }
 
         // Delete the character before the cursor (standard backspace).
-        // We find the previous UTF-8 character boundary to handle
-        // multi-byte characters correctly — deleting one character,
-        // not one byte. If the cursor is already at position 0,
-        // prev_char_boundary returns None and we do nothing.
         (KeyCode::Backspace, _) => {
-            if let Some(prev) = prev_char_boundary(&state.input_buffer, state.cursor_pos) {
-                state.input_buffer.drain(prev..state.cursor_pos);
-                state.cursor_pos = prev;
-            }
+            state.input.delete_back();
         }
 
         // Delete the character after the cursor (forward delete).
-        // Same UTF-8 boundary handling as backspace, but looking forward
-        // instead of backward.
         (KeyCode::Delete, _) => {
-            if state.cursor_pos < state.input_buffer.len() {
-                let next = next_char_boundary(&state.input_buffer, state.cursor_pos);
-                state.input_buffer.drain(state.cursor_pos..next);
-            }
+            state.input.delete_forward();
         }
 
-        // Move the cursor left one character. We find the previous
-        // UTF-8 character boundary rather than just decrementing,
-        // since characters can be multiple bytes wide. Returns None
-        // if the cursor is already at position 0.
+        // Move the cursor left one character.
         (KeyCode::Left, KeyModifiers::NONE) => {
-            if let Some(prev) = prev_char_boundary(&state.input_buffer, state.cursor_pos) {
-                state.cursor_pos = prev;
-            }
+            state.input.move_left();
         }
 
-        // Move the cursor right one character, advancing past the
-        // current character's UTF-8 bytes to the next boundary.
+        // Move the cursor right one character.
         (KeyCode::Right, KeyModifiers::NONE) => {
-            if state.cursor_pos < state.input_buffer.len() {
-                state.cursor_pos = next_char_boundary(&state.input_buffer, state.cursor_pos);
-            }
+            state.input.move_right();
         }
 
         // Jump cursor to the beginning of the input buffer.
         (KeyCode::Home, _) => {
-            state.cursor_pos = 0;
+            state.input.move_home();
         }
 
         // Jump cursor to the end of the input buffer.
         (KeyCode::End, _) => {
-            state.cursor_pos = state.input_buffer.len();
+            state.input.move_end();
         }
 
         // Enter scrolling mode and scroll up 10 lines. This switches
@@ -296,8 +286,7 @@ fn handle_normal_mode_key(
         // accept both unmodified characters and shifted characters
         // (e.g. Shift+A for uppercase, Shift+1 for '!').
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            state.input_buffer.insert(state.cursor_pos, c);
-            state.cursor_pos += c.len_utf8();
+            state.input.insert_char(c);
         }
 
         // All other key combinations are ignored in Normal mode.
@@ -391,15 +380,26 @@ fn handle_tool_approval_key(
         // likely the most recent message), build a ToolCall effect
         // from it, and return to Normal mode. The runner will execute
         // the tool and feed the result back as an AppEvent::ToolResult.
+        //
+        // If the tool call is not found (which indicates a bug — the
+        // ToolApproval mode should only contain IDs that exist in the
+        // conversation), we show an error instead of silently proceeding
+        // with no ExecuteTool effect.
         KeyCode::Char('y') => {
             if let Some(tool_call) = find_tool_call_by_id(state, tool_id) {
                 effects.push(Effect::ExecuteTool(tool_call));
+                state.mode = Mode::Normal;
+                state.status = StatusLine {
+                    text: "Executing tool...".to_string(),
+                    kind: StatusKind::Streaming,
+                };
+            } else {
+                state.mode = Mode::Normal;
+                state.status = StatusLine {
+                    text: "Internal error: tool call not found".to_string(),
+                    kind: StatusKind::Error,
+                };
             }
-            state.mode = Mode::Normal;
-            state.status = StatusLine {
-                text: "Executing tool...".to_string(),
-                kind: StatusKind::Streaming,
-            };
         }
 
         // Deny the tool call. We emit a DenyTool effect so the runner
@@ -439,7 +439,7 @@ fn handle_tool_approval_key(
 /// ToolApproval mode should only contain IDs that exist in the conversation.
 fn find_tool_call_by_id(state: &AppState, target_id: &ToolUseId) -> Option<ToolCall> {
     // Walk through messages from newest to oldest.
-    for message in state.conversation.messages.iter().rev() {
+    for message in state.conversation.messages().iter().rev() {
         // Check each content block in this message.
         for block in message.content() {
             // We only care about ToolUse blocks.
@@ -464,32 +464,7 @@ fn find_tool_call_by_id(state: &AppState, target_id: &ToolUseId) -> Option<ToolC
     None
 }
 
-/// Find the byte offset of the character boundary before `pos` in `text`.
-///
-/// Returns `None` when `pos` is 0 (there is no character before the start
-/// of the string). The caller decides what to do in that case — typically
-/// nothing, since the cursor is already at the beginning.
-///
-/// This exists because Rust strings are UTF-8, so "one character back"
-/// may be 1–4 bytes back depending on the character. Simply decrementing
-/// the byte offset would land in the middle of a multi-byte character.
-fn prev_char_boundary(text: &str, pos: usize) -> Option<usize> {
-    text[..pos].char_indices().next_back().map(|(i, _)| i)
-}
-
-/// Find the byte offset of the character boundary after `pos` in `text`.
-///
-/// When `pos` is at the last character in the string, the "next boundary"
-/// is `text.len()` — one past the end, which is the standard Rust convention
-/// for "end of string". This is always a valid and meaningful result, so
-/// the function returns `usize` directly rather than `Option<usize>`.
-///
-/// Like [`prev_char_boundary`], this exists because UTF-8 characters can
-/// be 1–4 bytes wide, so we can't just add 1 to the byte offset.
-fn next_char_boundary(text: &str, pos: usize) -> usize {
-    text[pos..]
-        .char_indices()
-        .nth(1)
-        .map(|(i, _)| pos + i)
-        .unwrap_or(text.len())
-}
+// Note: prev_char_boundary and next_char_boundary previously lived here.
+// They have been moved into InputBuffer::prev_boundary and
+// InputBuffer::next_boundary, where the char-boundary invariant is
+// enforced by construction rather than by caller discipline.

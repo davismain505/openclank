@@ -8,7 +8,9 @@
 //! Two implementations exist:
 //! - [`mock::MockBackend`]: returns canned responses for testing. Supports
 //!   text-only responses and tool-use responses with configurable chunking.
-//! - `anthropic` (Phase 4): real Anthropic Messages API with SSE streaming.
+//! - [`anthropic::AnthropicBackend`]: real Anthropic Messages API with SSE
+//!   response parsing. Supports OAuth (Claude Code credentials) and standard
+//!   API key authentication.
 
 pub mod anthropic;
 #[cfg(any(test, feature = "test-support"))]

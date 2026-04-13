@@ -158,7 +158,12 @@ impl ChatBackend for MockBackend {
 /// Split a string into chunks of at most `size` characters.
 /// Respects UTF-8 character boundaries — each chunk contains
 /// whole characters, never partial ones.
+///
+/// Panics if `size` is 0 — this is analogous to division by zero.
+/// Splitting into zero-sized chunks is nonsensical and would
+/// produce an infinite loop.
 fn split_into_chunks(text: &str, size: usize) -> Vec<String> {
+    assert!(size > 0, "split_into_chunks: size must be > 0 (analogous to division by zero)");
     let mut chunks = Vec::new();
     let mut chars = text.chars().peekable();
     while chars.peek().is_some() {

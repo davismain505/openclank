@@ -93,7 +93,7 @@ impl TestHarness {
                 // borrow on self.state before processing them. The mock
                 // backend doesn't actually need the messages to be live
                 // during streaming — it just reads the response index.
-                let stream = self.backend.send(&self.state.conversation.messages);
+                let stream = self.backend.send(&self.state.conversation.messages());
                 let results: Vec<_> = stream.collect().await;
 
                 for result in results {
@@ -142,18 +142,18 @@ async fn simple_text_conversation() {
 
     // After the mock responds, we should have two messages:
     // the user's and the assistant's.
-    assert_eq!(harness.state.conversation.messages.len(), 2);
+    assert_eq!(harness.state.conversation.messages().len(), 2);
 
-    let user_msg = &harness.state.conversation.messages[0];
+    let user_msg = &harness.state.conversation.messages()[0];
     assert_eq!(user_msg.role(), &Role::User);
     assert_eq!(user_msg.text(), "hi there");
 
-    let assistant_msg = &harness.state.conversation.messages[1];
+    let assistant_msg = &harness.state.conversation.messages()[1];
     assert_eq!(assistant_msg.role(), &Role::Assistant);
     assert_eq!(assistant_msg.text(), "Hello! How can I help?");
 
     // The draft should be finalized and status should be back to normal.
-    assert!(harness.state.conversation.draft.is_none());
+    assert!(harness.state.conversation.draft().is_none());
     assert_eq!(harness.state.status.kind, StatusKind::Info);
 }
 
@@ -179,7 +179,7 @@ async fn tool_use_enters_approval_mode() {
 
     // The assistant's message should contain both the leading text
     // and the tool-use block.
-    let assistant_msg = &harness.state.conversation.messages[1];
+    let assistant_msg = &harness.state.conversation.messages()[1];
     assert_eq!(assistant_msg.role(), &Role::Assistant);
     assert_eq!(assistant_msg.text(), "Let me check.");
     assert_eq!(assistant_msg.tool_uses().len(), 1);
@@ -228,8 +228,8 @@ async fn tool_approval_and_result_continues_conversation() {
     // 2. Assistant: tool-use request
     // 3. User: tool result ("root")
     // 4. Assistant: "You are root."
-    assert_eq!(harness.state.conversation.messages.len(), 4);
-    assert_eq!(harness.state.conversation.messages[3].text(), "You are root.");
+    assert_eq!(harness.state.conversation.messages().len(), 4);
+    assert_eq!(harness.state.conversation.messages()[3].text(), "You are root.");
     assert_eq!(harness.state.mode, Mode::Normal);
 }
 
@@ -273,8 +273,8 @@ async fn api_error_shows_in_status() {
 
     // The user message should still be in the conversation, but no
     // assistant message (the draft was discarded).
-    assert_eq!(harness.state.conversation.messages.len(), 1);
-    assert_eq!(harness.state.conversation.messages[0].role(), &Role::User);
+    assert_eq!(harness.state.conversation.messages().len(), 1);
+    assert_eq!(harness.state.conversation.messages()[0].role(), &Role::User);
 }
 
 // ─── Multi-turn conversation ─────────────────────────────────────────
@@ -296,11 +296,11 @@ async fn multi_turn_conversation() {
     // First turn.
     harness.type_str("who are you").await;
     harness.press(KeyCode::Enter).await;
-    assert_eq!(harness.state.conversation.messages.len(), 2);
+    assert_eq!(harness.state.conversation.messages().len(), 2);
 
     // Second turn.
     harness.type_str("what do you do").await;
     harness.press(KeyCode::Enter).await;
-    assert_eq!(harness.state.conversation.messages.len(), 4);
-    assert_eq!(harness.state.conversation.messages[3].text(), "I help with coding.");
+    assert_eq!(harness.state.conversation.messages().len(), 4);
+    assert_eq!(harness.state.conversation.messages()[3].text(), "I help with coding.");
 }

@@ -58,8 +58,8 @@ fn typing_characters_appends_to_input_buffer() {
     let state = AppState::default();
     let state = type_string(state, "hello");
 
-    assert_eq!(state.input_buffer, "hello");
-    assert_eq!(state.cursor_pos, 5);
+    assert_eq!(state.input.text(), "hello");
+    assert_eq!(state.input.cursor(), 5);
 }
 
 #[test]
@@ -68,9 +68,9 @@ fn typing_multibyte_characters_tracks_byte_offsets() {
     // 'é' is 2 bytes in UTF-8, '日' is 3 bytes
     let state = type_string(state, "é日");
 
-    assert_eq!(state.input_buffer, "é日");
+    assert_eq!(state.input.text(), "é日");
     // cursor_pos is a byte offset: 2 bytes for 'é' + 3 bytes for '日'
-    assert_eq!(state.cursor_pos, 5);
+    assert_eq!(state.input.cursor(), 5);
 }
 
 #[test]
@@ -80,8 +80,8 @@ fn backspace_deletes_character_before_cursor() {
 
     let (state, _) = update(state, key(KeyCode::Backspace));
 
-    assert_eq!(state.input_buffer, "hell");
-    assert_eq!(state.cursor_pos, 4);
+    assert_eq!(state.input.text(), "hell");
+    assert_eq!(state.input.cursor(), 4);
 }
 
 #[test]
@@ -90,8 +90,8 @@ fn backspace_at_start_of_input_does_nothing() {
 
     let (state, _) = update(state, key(KeyCode::Backspace));
 
-    assert_eq!(state.input_buffer, "");
-    assert_eq!(state.cursor_pos, 0);
+    assert_eq!(state.input.text(), "");
+    assert_eq!(state.input.cursor(), 0);
 }
 
 #[test]
@@ -102,21 +102,22 @@ fn backspace_handles_multibyte_characters() {
     let (state, _) = update(state, key(KeyCode::Backspace));
 
     // Should delete the 'é' (2 bytes), leaving just 'a'
-    assert_eq!(state.input_buffer, "a");
-    assert_eq!(state.cursor_pos, 1);
+    assert_eq!(state.input.text(), "a");
+    assert_eq!(state.input.cursor(), 1);
 }
 
 #[test]
 fn delete_removes_character_after_cursor() {
     let state = AppState::default();
     let mut state = type_string(state, "hello");
-    // Move cursor to position 3 ("hel|lo")
-    state.cursor_pos = 3;
+    // Move cursor to position 3 ("hel|lo") — two left from end
+    state.input.move_left(); // after 'o' → after 'l'
+    state.input.move_left(); // after 'l' → after 'l' (pos 3)
 
     let (state, _) = update(state, key(KeyCode::Delete));
 
-    assert_eq!(state.input_buffer, "helo");
-    assert_eq!(state.cursor_pos, 3);
+    assert_eq!(state.input.text(), "helo");
+    assert_eq!(state.input.cursor(), 3);
 }
 
 #[test]
@@ -126,8 +127,8 @@ fn delete_at_end_of_input_does_nothing() {
 
     let (state, _) = update(state, key(KeyCode::Delete));
 
-    assert_eq!(state.input_buffer, "hello");
-    assert_eq!(state.cursor_pos, 5);
+    assert_eq!(state.input.text(), "hello");
+    assert_eq!(state.input.cursor(), 5);
 }
 
 #[test]
@@ -137,7 +138,7 @@ fn left_arrow_moves_cursor_back_one_character() {
 
     let (state, _) = update(state, key(KeyCode::Left));
 
-    assert_eq!(state.cursor_pos, 1);
+    assert_eq!(state.input.cursor(), 1);
 }
 
 #[test]
@@ -146,18 +147,18 @@ fn left_arrow_at_start_does_nothing() {
 
     let (state, _) = update(state, key(KeyCode::Left));
 
-    assert_eq!(state.cursor_pos, 0);
+    assert_eq!(state.input.cursor(), 0);
 }
 
 #[test]
 fn right_arrow_moves_cursor_forward_one_character() {
     let state = AppState::default();
     let mut state = type_string(state, "hi");
-    state.cursor_pos = 0;
+    state.input.move_home();
 
     let (state, _) = update(state, key(KeyCode::Right));
 
-    assert_eq!(state.cursor_pos, 1);
+    assert_eq!(state.input.cursor(), 1);
 }
 
 #[test]
@@ -167,7 +168,7 @@ fn right_arrow_at_end_does_nothing() {
 
     let (state, _) = update(state, key(KeyCode::Right));
 
-    assert_eq!(state.cursor_pos, 2);
+    assert_eq!(state.input.cursor(), 2);
 }
 
 #[test]
@@ -177,18 +178,18 @@ fn home_moves_cursor_to_start() {
 
     let (state, _) = update(state, key(KeyCode::Home));
 
-    assert_eq!(state.cursor_pos, 0);
+    assert_eq!(state.input.cursor(), 0);
 }
 
 #[test]
 fn end_moves_cursor_to_end() {
     let state = AppState::default();
     let mut state = type_string(state, "hello");
-    state.cursor_pos = 0;
+    state.input.move_home();
 
     let (state, _) = update(state, key(KeyCode::End));
 
-    assert_eq!(state.cursor_pos, 5);
+    assert_eq!(state.input.cursor(), 5);
 }
 
 #[test]
@@ -199,7 +200,7 @@ fn shift_enter_inserts_newline() {
     let (state, _) = update(state, key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
     let state = type_string(state, "line2");
 
-    assert_eq!(state.input_buffer, "line1\nline2");
+    assert_eq!(state.input.text(), "line1\nline2");
 }
 
 // ─── Normal mode: sending messages ───────────────────────────────────
@@ -212,13 +213,13 @@ fn enter_sends_message_and_clears_input() {
     let (state, effects) = update(state, key(KeyCode::Enter));
 
     // Input should be cleared.
-    assert_eq!(state.input_buffer, "");
-    assert_eq!(state.cursor_pos, 0);
+    assert_eq!(state.input.text(), "");
+    assert_eq!(state.input.cursor(), 0);
 
     // The message should be in the conversation.
-    assert_eq!(state.conversation.messages.len(), 1);
-    assert_eq!(state.conversation.messages[0].text(), "hello claude");
-    assert_eq!(state.conversation.messages[0].role(), &Role::User);
+    assert_eq!(state.conversation.messages().len(), 1);
+    assert_eq!(state.conversation.messages()[0].text(), "hello claude");
+    assert_eq!(state.conversation.messages()[0].role(), &Role::User);
 
     // A SendMessage effect should be emitted.
     assert_eq!(effects, vec![Effect::SendMessage]);
@@ -233,7 +234,7 @@ fn enter_on_empty_input_does_nothing() {
 
     let (state, effects) = update(state, key(KeyCode::Enter));
 
-    assert_eq!(state.conversation.messages.len(), 0);
+    assert_eq!(state.conversation.messages().len(), 0);
     assert!(effects.is_empty());
 }
 
@@ -244,7 +245,7 @@ fn enter_on_whitespace_only_input_does_nothing() {
 
     let (state, effects) = update(state, key(KeyCode::Enter));
 
-    assert_eq!(state.conversation.messages.len(), 0);
+    assert_eq!(state.conversation.messages().len(), 0);
     assert!(effects.is_empty());
 }
 
@@ -255,7 +256,7 @@ fn enter_trims_whitespace_from_message() {
 
     let (state, _) = update(state, key(KeyCode::Enter));
 
-    assert_eq!(state.conversation.messages[0].text(), "hello");
+    assert_eq!(state.conversation.messages()[0].text(), "hello");
 }
 
 // ─── Normal mode: quitting ───────────────────────────────────────────
@@ -356,7 +357,7 @@ fn api_stream_start_creates_draft() {
 
     let (state, _) = update(state, AppEvent::ApiStreamStart);
 
-    assert!(state.conversation.draft.is_some());
+    assert!(state.conversation.draft().is_some());
     assert_eq!(state.status.kind, StatusKind::Streaming);
 }
 
@@ -367,7 +368,7 @@ fn api_text_delta_appends_to_draft() {
     let (state, _) = update(state, AppEvent::ApiTextDelta("hello ".to_string()));
     let (state, _) = update(state, AppEvent::ApiTextDelta("world".to_string()));
 
-    assert_eq!(state.conversation.draft.as_ref().unwrap().text(), "hello world");
+    assert_eq!(state.conversation.draft().as_ref().unwrap().text(), "hello world");
 }
 
 #[test]
@@ -378,10 +379,10 @@ fn api_done_finalizes_draft_into_message() {
     let (state, _) = update(state, AppEvent::ApiDone);
 
     // Draft should be gone, message should exist.
-    assert!(state.conversation.draft.is_none());
-    assert_eq!(state.conversation.messages.len(), 1);
-    assert_eq!(state.conversation.messages[0].text(), "response");
-    assert_eq!(state.conversation.messages[0].role(), &Role::Assistant);
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 1);
+    assert_eq!(state.conversation.messages()[0].text(), "response");
+    assert_eq!(state.conversation.messages()[0].role(), &Role::Assistant);
     assert_eq!(state.status.kind, StatusKind::Info);
 }
 
@@ -393,8 +394,8 @@ fn api_error_discards_draft_and_shows_error() {
     let (state, _) = update(state, AppEvent::ApiError("rate limited".to_string()));
 
     // Draft should be discarded — no partial message in conversation.
-    assert!(state.conversation.draft.is_none());
-    assert_eq!(state.conversation.messages.len(), 0);
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 0);
     assert_eq!(state.status.kind, StatusKind::Error);
     assert!(state.status.text.contains("rate limited"));
 }
@@ -402,10 +403,13 @@ fn api_error_discards_draft_and_shows_error() {
 // ─── Tool use flow ───────────────────────────────────────────────────
 
 #[test]
-fn api_tool_use_enters_approval_mode() {
+fn api_tool_use_enters_approval_on_done() {
     let state = AppState::default();
     let tool_id = ToolUseId::new("toolu_abc123").unwrap();
     let (state, _) = update(state, AppEvent::ApiStreamStart);
+
+    // ApiToolUse adds the tool call to the draft but does NOT enter
+    // ToolApproval yet — we need to wait for ApiDone to see all tools.
     let (state, _) = update(
         state,
         AppEvent::ApiToolUse {
@@ -414,17 +418,17 @@ fn api_tool_use_enters_approval_mode() {
             input: serde_json::json!({"command": "ls"}),
         },
     );
+    assert!(state.conversation.draft().is_some(), "draft should still exist after ApiToolUse");
 
-    // Should be in ToolApproval mode with the right ID.
+    // ApiDone finalizes the draft and enters ToolApproval for the
+    // first tool-use block in the finalized message.
+    let (state, _) = update(state, AppEvent::ApiDone);
+
     assert_eq!(state.mode, Mode::ToolApproval(tool_id.clone()));
+    assert!(state.conversation.draft().is_none());
+    assert_eq!(state.conversation.messages().len(), 1);
 
-    // The draft should be finalized — the tool-use message should be
-    // in the conversation so the user can see what was requested.
-    assert!(state.conversation.draft.is_none());
-    assert_eq!(state.conversation.messages.len(), 1);
-
-    // The message should contain the tool-use block.
-    let tool_uses = state.conversation.messages[0].tool_uses();
+    let tool_uses = state.conversation.messages()[0].tool_uses();
     assert_eq!(tool_uses.len(), 1);
     assert_eq!(tool_uses[0].1, &tool_id);
     assert_eq!(tool_uses[0].2, ToolName::Bash);
@@ -435,8 +439,7 @@ fn approving_tool_emits_execute_effect() {
     let state = AppState::default();
     let tool_id = ToolUseId::new("toolu_abc123").unwrap();
 
-    // Set up a conversation with a tool-use message already in it
-    // (as if ApiToolUse had already been processed).
+    // Stream a tool-use response and finalize it.
     let (state, _) = update(state, AppEvent::ApiStreamStart);
     let (state, _) = update(
         state,
@@ -446,6 +449,7 @@ fn approving_tool_emits_execute_effect() {
             input: serde_json::json!({"command": "ls -la"}),
         },
     );
+    let (state, _) = update(state, AppEvent::ApiDone);
     assert_eq!(state.mode, Mode::ToolApproval(tool_id.clone()));
 
     // Press 'y' to approve.
@@ -476,6 +480,7 @@ fn denying_tool_emits_deny_effect() {
             input: serde_json::json!({"path": "/etc/passwd"}),
         },
     );
+    let (state, _) = update(state, AppEvent::ApiDone);
 
     // Press 'n' to deny.
     let (state, effects) = update(state, key(KeyCode::Char('n')));
@@ -521,10 +526,10 @@ fn tool_result_adds_message_and_sends_to_api() {
     );
 
     // Should have 3 messages now: user, assistant, tool result.
-    assert_eq!(state.conversation.messages.len(), 3);
+    assert_eq!(state.conversation.messages().len(), 3);
 
     // The tool result message should be a user message with a ToolResult block.
-    let result_msg = &state.conversation.messages[2];
+    let result_msg = &state.conversation.messages()[2];
     assert_eq!(result_msg.role(), &Role::User);
     let block = &result_msg.content()[0];
     match block {
@@ -558,7 +563,7 @@ fn tool_error_result_is_flagged() {
         },
     );
 
-    let block = &state.conversation.messages[0].content()[0];
+    let block = &state.conversation.messages()[0].content()[0];
     match block {
         ContentBlock::ToolResult { is_error, .. } => assert!(is_error),
         other => panic!("expected ToolResult block, got {other:?}"),
