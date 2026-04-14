@@ -22,11 +22,9 @@
 //! OAuth tokens require Bearer authentication and a specific set of
 //! headers including beta flags and a billing signature injected into
 //! the system prompt. This is the same protocol that Claude Code itself
-//! uses.
-//!
-//! Alternatively, a standard API key can be passed via the
-//! `ANTHROPIC_API_KEY` environment variable, which takes precedence
-//! and uses the simpler `x-api-key` header without billing signatures.
+//! uses. We don't support standard Anthropic API keys — those would
+//! bill separately from the Claude Code subscription, which defeats
+//! the purpose of this tool.
 //!
 //! ## SSE Parsing
 //!
@@ -131,16 +129,6 @@ impl AnthropicBackend {
         Ok(creds.claude_ai_oauth.access_token)
     }
 
-    /// Resolve the API key from (in priority order):
-    /// 1. `ANTHROPIC_API_KEY` environment variable
-    /// 2. Claude Code credentials file (`~/.claude/.credentials.json`)
-    pub fn resolve_api_key() -> Result<String, String> {
-        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            return Ok(key);
-        }
-
-        Self::load_claude_credentials()
-    }
 }
 
 /// The structure of `~/.claude/.credentials.json`.

@@ -16,7 +16,7 @@ use openclank::state::message::Message;
 
 /// Resolve an API key or skip the test if none is available.
 fn get_backend() -> Option<AnthropicBackend> {
-    let api_key = AnthropicBackend::resolve_api_key().ok()?;
+    let api_key = AnthropicBackend::load_claude_credentials().ok()?;
     Some(AnthropicBackend::new(
         api_key,
         "claude-sonnet-4-20250514".to_string(),
